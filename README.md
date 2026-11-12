@@ -147,7 +147,7 @@ class MyConnector(Connector):
         ...
 ```
 
-Полный пример — `examples/plugins/disk_space.py` (контроль свободного места на диске).
+Полный пример — `examples/plugins/disk_space.py` (контроль свободного места на диске). Подробное описание API — [docs/connectors.md](docs/connectors.md).
 
 ## Системные требования
 

@@ -1,0 +1,3 @@
+# Runtime data (database, encryption key, logs, backups) — never commit
+/data/
+/.env

@@ -1,0 +1,3523 @@
+"use strict";
+
+const LANGS = { ru: "Русский", en: "English" };
+const LANG = detectLanguage();
+const LOCALE = LANG === "ru" ? "ru-RU" : "en-GB";
+const DICT = (window.OW_LOCALES && window.OW_LOCALES[LANG]) || {};
+
+function detectLanguage() {
+  let saved = "";
+  try {
+    saved = localStorage.getItem("ow_lang") || "";
+  } catch (e) {
+    saved = "";
+  }
+  if (saved === "ru" || saved === "en") return saved;
+  const nav = (navigator.language || "ru").toLowerCase();
+  return /^(ru|uk|be|kk)/.test(nav) ? "ru" : "en";
+}
+
+function t(text, values) {
+  let result = (LANG !== "ru" && DICT[text]) || text;
+  if (values) result = result.replace(/\{(\w+)\}/g, (m, key) => (values[key] !== undefined ? String(values[key]) : m));
+  return result;
+}
+
+function explicitLanguage() {
+  try {
+    return localStorage.getItem("ow_lang") || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+async function setLanguage(lang, persist = true) {
+  if (persist && S.token && S.me) {
+    await api("/api/profile", { method: "PUT", body: { language: lang } }).catch(() => {});
+  }
+  store("ow_lang", lang);
+  location.reload();
+}
+
+async function syncLanguage() {
+  if (!S.me) return false;
+  const saved = explicitLanguage();
+  if (saved && saved !== S.me.language) {
+    S.me = await api("/api/profile", { method: "PUT", body: { language: saved } }).catch(() => S.me);
+    return false;
+  }
+  if (!saved && S.me.language && S.me.language !== LANG) {
+    store("ow_lang", S.me.language);
+    location.reload();
+    return true;
+  }
+  return false;
+}
+
+const S = {
+  token: store("ow_token"),
+  me: null,
+  meta: null,
+  route: "overview",
+  unread: 0,
+  chatUnread: 0,
+  open: {},
+  lastNotif: -1,
+  lastChat: -1,
+  pollTimer: null,
+  refreshTimer: null,
+  refresh: null,
+  seq: 0,
+  dropdown: null,
+};
+
+const SEV = { info: t("Информация"), warning: t("Предупреждение"), critical: t("Критично") };
+const SEV_SHORT = { info: t("Инфо"), warning: t("Предупр."), critical: t("Критично") };
+const STATUS = { new: t("Новое"), acked: t("Принято"), resolved: t("Решено") };
+const CAT = { monitoring: t("Мониторинг"), database: t("Базы данных"), onec: t("1С"), backup: t("Бэкапы"), bug: t("Ошибки"), system: t("Система") };
+const CAT_ICON = { monitoring: "activity", database: "database", onec: "box", backup: "archive", bug: "bug", system: "shield" };
+const CAT_TAB = { monitoring: "monitoring", database: "databases", onec: "onec", backup: "backups", bug: "bugs", system: "journal" };
+const VIEW_PERMS = ["monitoring.view", "databases.view", "onec.view", "backups.view", "bugs.view", "system.view"];
+const BACKUP_STATUS = { ok: t("Успешно"), failed: t("Ошибка"), running: t("Выполняется"), never: t("Не запускался") };
+const SOURCE_STATUS = { ok: t("Работает"), error: t("Недоступен"), unknown: t("Ожидает проверки"), waiting: t("Ожидает данных") };
+
+const ICONS = {
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/>',
+  box: '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/>',
+  archive: '<rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',
+  bug: '<path d="m8 2 1.88 1.88M14.12 3.88 16 2M9 7.13v-1a3 3 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M3 21c0-2.1 1.7-3.9 3.8-4M20.97 5c0 2.1-1.6 3.8-3.5 4M22 13h-4M17.2 17c2.1.1 3.8 1.9 3.8 4"/>',
+  shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  x: '<path d="M18 6 6 18M6 6l12 12"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  play: '<polygon points="6 3 20 12 6 21 6 3"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  trash: '<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  refresh: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
+  user: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
+  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>',
+  alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4M12 17h.01"/>',
+  sliders: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  chart: '<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+  message: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+  bellOff: '<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="m2 2 20 20"/>',
+  arrowLeft: '<path d="m12 19-7-7 7-7M19 12H5"/>',
+  server: '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/>',
+};
+
+function store(key, value) {
+  try {
+    if (value === undefined) return localStorage.getItem(key) || "";
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch (e) {
+    return "";
+  }
+  return value;
+}
+
+function icon(name) {
+  const t = document.createElement("template");
+  t.innerHTML = `<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
+  return t.content.firstChild;
+}
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  if (props) {
+    for (const [k, v] of Object.entries(props)) {
+      if (v === null || v === undefined || v === false) continue;
+      if (k === "class") el.className = v;
+      else if (k === "style") el.style.cssText = v;
+      else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
+      else if (["value", "checked", "selected", "disabled", "multiple", "indeterminate"].includes(k)) el[k] = v;
+      else el.setAttribute(k, v === true ? "" : String(v));
+    }
+  }
+  append(el, kids);
+  return el;
+}
+
+function fill(el, ...kids) {
+  el.replaceChildren();
+  return append(el, kids);
+}
+
+function append(el, kids) {
+  for (const kid of (Array.isArray(kids) ? kids : [kids]).flat(Infinity)) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+
+function can(perm) {
+  return !!(S.me && S.me.status === "active" && S.me.permissions.includes(perm));
+}
+
+function bridge() {
+  return window.pywebview && window.pywebview.api ? window.pywebview.api : null;
+}
+
+async function api(path, opts = {}) {
+  const headers = { "X-Lang": LANG };
+  if (S.token) headers.Authorization = "Bearer " + S.token;
+  let body = opts.body;
+  if (body !== undefined && !(body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(body);
+  }
+  let res;
+  try {
+    res = await fetch(path, { method: opts.method || (body !== undefined ? "POST" : "GET"), headers, body, signal: opts.signal });
+  } catch (e) {
+    throw new Error(t("Сервер недоступен"));
+  }
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch (e) {
+    data = text;
+  }
+  if (res.status === 401 && S.token && !opts.silent401) {
+    logoutLocal();
+    throw new Error(t("Сессия завершена, войдите снова"));
+  }
+  if (!res.ok) {
+    const detail = data && data.detail ? data.detail : t("Ошибка ") + res.status;
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return data;
+}
+
+function toast(message, type = "") {
+  const box = document.getElementById("toasts");
+  const el = h("div", { class: "toast " + type }, message);
+  box.append(el);
+  setTimeout(() => el.remove(), type === "error" ? 6000 : 3500);
+}
+
+async function guard(fn, okMessage) {
+  try {
+    const result = await fn();
+    if (okMessage) toast(okMessage);
+    return result;
+  } catch (e) {
+    toast(e.message, "error");
+    return undefined;
+  }
+}
+
+function modal({ title, subtitle, body, foot, wide, onClose }) {
+  const root = document.getElementById("modal-root");
+  let backdrop;
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+  };
+  function close() {
+    if (!backdrop.isConnected) return;
+    backdrop.remove();
+    document.removeEventListener("keydown", onKey);
+    if (onClose) onClose();
+  }
+  backdrop = h(
+    "div",
+    { class: "modal-backdrop", onmousedown: (e) => { if (e.target === backdrop) close(); } },
+    h(
+      "div",
+      { class: "modal" + (wide ? " wide" : ""), role: "dialog" },
+      h(
+        "div",
+        { class: "modal-head" },
+        h("div", null, h("h2", null, title), subtitle ? h("div", { class: "muted small" }, subtitle) : null),
+        h("button", { class: "icon-btn", onclick: close, title: t("Закрыть") }, icon("x"))
+      ),
+      h("div", { class: "modal-body" }, body),
+      foot && foot.length ? h("div", { class: "modal-foot" }, foot) : null
+    )
+  );
+  document.addEventListener("keydown", onKey);
+  root.append(backdrop);
+  return { close, el: backdrop };
+}
+
+function confirmDialog(text, action, label = t("Удалить")) {
+  const m = modal({
+    title: t("Подтверждение"),
+    body: h("p", null, text),
+    foot: [
+      h("button", { class: "btn", onclick: () => m.close() }, t("Отмена")),
+      h("button", { class: "btn primary", onclick: async () => { m.close(); await action(); } }, label),
+    ],
+  });
+}
+
+function parseDate(iso) {
+  return iso ? new Date(iso) : null;
+}
+
+function fmtDate(iso, withYear = false) {
+  const d = parseDate(iso);
+  if (!d) return "—";
+  return d.toLocaleString(LOCALE, {
+    day: "2-digit",
+    month: "2-digit",
+    year: withYear ? "numeric" : undefined,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function ago(iso) {
+  const d = parseDate(iso);
+  if (!d) return "—";
+  const sec = Math.round((Date.now() - d.getTime()) / 1000);
+  if (sec < 0) return t("через ") + duration(-sec);
+  if (sec < 45) return t("только что");
+  return duration(sec) + t(" назад");
+}
+
+function duration(sec) {
+  if (sec < 90) return Math.max(1, Math.round(sec / 60)) + t(" мин");
+  if (sec < 3600) return Math.round(sec / 60) + t(" мин");
+  if (sec < 86400) return Math.round(sec / 3600) + t(" ч");
+  return Math.round(sec / 86400) + t(" дн");
+}
+
+function humanSize(n, digits = 1) {
+  if (n === null || n === undefined) return "—";
+  const units = [t("Б"), t("КБ"), t("МБ"), t("ГБ"), t("ТБ")];
+  let v = Number(n);
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return (i === 0 ? v.toFixed(0) : v.toFixed(digits)) + " " + units[i];
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svg(tag, attrs, ...kids) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v !== null && v !== undefined) el.setAttribute(k, String(v));
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+
+function formatMetric(value, unit, digits) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  const num = (v, d) => Number(v).toLocaleString(LOCALE, { maximumFractionDigits: d });
+  const fixed = digits !== undefined;
+  switch (unit) {
+    case "bytes":
+      return humanSize(value, fixed ? digits : 1);
+    case "ms":
+      return (fixed ? num(value, digits - 1) : num(Math.round(value), 0)) + t(" мс");
+    case "sec":
+      return num(value, fixed ? digits : value >= 100 ? 0 : 1) + t(" с");
+    case "mb":
+      return humanSize(value * 1024 * 1024, fixed ? digits : 1);
+    case "gb":
+      return humanSize(value * 1024 * 1024 * 1024, fixed ? digits : 1);
+    case "percent":
+      return num(value, fixed ? digits : 1) + "%";
+    default:
+      return num(value, fixed ? digits : Number.isInteger(value) ? 0 : 1);
+  }
+}
+
+function tickLabels(ticks, unit) {
+  for (let digits = 1; digits <= 4; digits++) {
+    const labels = ticks.map((v) => formatMetric(v, unit, digits));
+    if (new Set(labels).size === labels.length) return labels;
+  }
+  return ticks.map((v) => formatMetric(v, unit, 4));
+}
+
+function niceTicks(min, max, count = 4) {
+  if (min === max) {
+    const pad = Math.abs(min) * 0.1 || 1;
+    min -= pad;
+    max += pad;
+  }
+  const span = max - min;
+  const raw = span / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((candidate) => span / candidate <= count) || 10 * mag;
+  const start = Math.floor(min / step) * step;
+  const end = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = start; v <= end + step / 2; v += step) ticks.push(Number(v.toFixed(10)));
+  return ticks;
+}
+
+function formatTick(ms, span) {
+  const d = new Date(ms);
+  if (span <= 36 * 3600 * 1000) return d.toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString(LOCALE, { day: "2-digit", month: "2-digit" });
+}
+
+function lineChart(points, unit, label) {
+  const W = 760;
+  const H = 260;
+  const M = { top: 18, right: 72, bottom: 30, left: 70 };
+  const xs = points.map((p) => new Date(p[0]).getTime());
+  const ys = points.map((p) => p[1]);
+  let xMin = xs[0];
+  let xMax = xs[xs.length - 1];
+  if (xMin === xMax) {
+    xMin -= 3600 * 1000;
+    xMax += 3600 * 1000;
+  }
+  const ticks = niceTicks(Math.min(...ys), Math.max(...ys));
+  const labels = tickLabels(ticks, unit);
+  const yMin = ticks[0];
+  const yMax = ticks[ticks.length - 1];
+  const x = (t) => M.left + ((t - xMin) / (xMax - xMin)) * (W - M.left - M.right);
+  const y = (v) => M.top + (1 - (v - yMin) / (yMax - yMin || 1)) * (H - M.top - M.bottom);
+  const diffs = xs.slice(1).map((t, i) => t - xs[i]).sort((a, b) => a - b);
+  const typical = diffs.length ? diffs[Math.floor(diffs.length / 2)] : 0;
+  let line = "";
+  let area = "";
+  let segment = [];
+  const flush = () => {
+    if (!segment.length) return;
+    line += segment.map((i, k) => `${k ? "L" : "M"}${x(xs[i]).toFixed(1)},${y(ys[i]).toFixed(1)}`).join("");
+    if (segment.length > 1) {
+      const first = segment[0];
+      const last = segment[segment.length - 1];
+      area += `M${x(xs[first]).toFixed(1)},${y(yMin).toFixed(1)}` + segment.map((i) => `L${x(xs[i]).toFixed(1)},${y(ys[i]).toFixed(1)}`).join("") + `L${x(xs[last]).toFixed(1)},${y(yMin).toFixed(1)}Z`;
+    }
+    segment = [];
+  };
+  xs.forEach((t, i) => {
+    if (i && typical && t - xs[i - 1] > typical * 3) flush();
+    segment.push(i);
+  });
+  flush();
+  const span = xMax - xMin;
+  const xTicks = [];
+  for (let i = 0; i <= 4; i++) xTicks.push(xMin + (span * i) / 4);
+  const last = points.length - 1;
+  const crosshair = svg("line", { class: "crosshair", y1: M.top, y2: H - M.bottom, visibility: "hidden" });
+  const hoverDot = svg("circle", { class: "dot", r: 4, visibility: "hidden" });
+  const chart = svg(
+    "svg",
+    { viewBox: `0 0 ${W} ${H}`, class: "chart-svg", role: "img", "aria-label": label },
+    ticks.map((t, i) => [
+      svg("line", { class: "grid", x1: M.left, x2: W - M.right, y1: y(t), y2: y(t) }),
+      svg("text", { class: "axis", x: M.left - 8, y: y(t) + 4, "text-anchor": "end" }, labels[i]),
+    ]),
+    xTicks.map((t, i) => svg("text", { class: "axis", x: x(t), y: H - 8, "text-anchor": i === 0 ? "start" : i === 4 ? "end" : "middle" }, formatTick(t, span))),
+    svg("path", { class: "area", d: area }),
+    svg("path", { class: "line", d: line }),
+    crosshair,
+    svg("circle", { class: "dot", cx: x(xs[last]), cy: y(ys[last]), r: 4 }),
+    svg("text", { class: "end-label", x: x(xs[last]) + 9, y: y(ys[last]) + 4 }, formatMetric(ys[last], unit)),
+    hoverDot
+  );
+  const tip = h("div", { class: "chart-tip hidden" });
+  const wrap = h("div", { class: "chart" }, chart, tip);
+  const hit = svg("rect", { x: M.left, y: M.top, width: W - M.left - M.right, height: H - M.top - M.bottom, fill: "transparent", tabindex: 0 });
+  const show = (index) => {
+    const px = x(xs[index]);
+    const py = y(ys[index]);
+    crosshair.setAttribute("x1", px);
+    crosshair.setAttribute("x2", px);
+    crosshair.setAttribute("visibility", "visible");
+    hoverDot.setAttribute("cx", px);
+    hoverDot.setAttribute("cy", py);
+    hoverDot.setAttribute("visibility", "visible");
+    tip.replaceChildren(h("strong", null, formatMetric(ys[index], unit)), h("div", { class: "muted small" }, fmtDate(points[index][0])));
+    tip.classList.remove("hidden");
+    const rect = chart.getBoundingClientRect();
+    const left = (px / W) * rect.width;
+    tip.style.left = Math.min(Math.max(left, 60), rect.width - 60) + "px";
+    tip.style.top = Math.max(0, (py / H) * rect.height - 58) + "px";
+  };
+  const hide = () => {
+    crosshair.setAttribute("visibility", "hidden");
+    hoverDot.setAttribute("visibility", "hidden");
+    tip.classList.add("hidden");
+  };
+  let focusIndex = last;
+  hit.addEventListener("pointermove", (e) => {
+    const rect = chart.getBoundingClientRect();
+    const t = xMin + (((e.clientX - rect.left) * (W / rect.width) - M.left) / (W - M.left - M.right)) * span;
+    let best = 0;
+    for (let i = 1; i < xs.length; i++) if (Math.abs(xs[i] - t) < Math.abs(xs[best] - t)) best = i;
+    focusIndex = best;
+    show(best);
+  });
+  hit.addEventListener("pointerleave", hide);
+  hit.addEventListener("focus", () => show(focusIndex));
+  hit.addEventListener("blur", hide);
+  hit.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") focusIndex = Math.max(0, focusIndex - 1);
+    else if (e.key === "ArrowRight") focusIndex = Math.min(last, focusIndex + 1);
+    else return;
+    e.preventDefault();
+    show(focusIndex);
+  });
+  chart.append(hit);
+  return wrap;
+}
+
+function sparkline(values, title) {
+  const W = 120;
+  const H = 28;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const sx = (i) => 2 + (i / (values.length - 1)) * (W - 8);
+  const sy = (v) => (max === min ? H / 2 : 3 + (1 - (v - min) / (max - min)) * (H - 6));
+  const pointsAttr = values.map((v, i) => `${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(" ");
+  const last = values.length - 1;
+  return svg(
+    "svg",
+    { viewBox: `0 0 ${W} ${H}`, class: "sparkline", width: W, height: H, role: "img", "aria-label": title },
+    svg("title", null, title),
+    svg("polyline", { points: pointsAttr }),
+    svg("circle", { cx: sx(last), cy: sy(values[last]), r: 2.5 })
+  );
+}
+
+async function openMetrics(source) {
+  let data;
+  try {
+    data = await api(`/api/sources/${source.id}/metrics`);
+  } catch (err) {
+    toast(err.message, "error");
+    return;
+  }
+  const series = data.series;
+  const st = { name: (series.find((s) => s.primary) || series[0] || {}).name, period: "24h" };
+  const metricChips = h("div", { class: "chips" });
+  const periodChips = h("div", { class: "chips" });
+  const area = h("div", { class: "chart-area" });
+  const table = h("div");
+  async function load() {
+    metricChips.replaceChildren(...series.map((s) => h("button", { class: "chip" + (st.name === s.name ? " active" : ""), onclick: () => { st.name = s.name; load(); } }, s.title)));
+    periodChips.replaceChildren(...[["24h", t("24 часа")], ["7d", t("7 дней")], ["30d", t("30 дней")]].map(([v, t]) => h("button", { class: "chip" + (st.period === v ? " active" : ""), onclick: () => { st.period = v; load(); } }, t)));
+    area.classList.add("loading");
+    const result = await guard(() => api(`/api/sources/${source.id}/metrics/${encodeURIComponent(st.name)}?period=${st.period}`));
+    area.classList.remove("loading");
+    if (!result) return;
+    if (!result.points.length) {
+      area.replaceChildren(emptyState("chart", t("За выбранный период данных нет")));
+      table.replaceChildren();
+      return;
+    }
+    area.replaceChildren(h("div", { class: "between", style: "margin-bottom:6px" }, h("strong", null, result.title), h("span", { class: "muted small" }, t("Последнее значение: "), formatMetric(result.points[result.points.length - 1][1], result.unit))), lineChart(result.points, result.unit, result.title));
+    table.replaceChildren(
+      h(
+        "details",
+        null,
+        h("summary", { class: "muted small", style: "cursor:pointer" }, t("Таблица значений")),
+        h(
+          "div",
+          { class: "table-wrap", style: "max-height:260px;overflow-y:auto;margin-top:8px" },
+          h("table", { class: "table" }, h("thead", null, h("tr", null, h("th", null, t("Время")), h("th", { class: "right" }, result.title))), h("tbody", null, result.points.slice().reverse().map((p) => h("tr", null, h("td", null, fmtDate(p[0])), h("td", { class: "right mono" }, formatMetric(p[1], result.unit))))))
+        )
+      )
+    );
+  }
+  const body = series.length
+    ? h("div", { class: "stack" }, h("div", { class: "row" }, periodChips, h("span", { class: "tab-sep", style: "height:22px;margin:0 4px" }), metricChips), area, table)
+    : emptyState("chart", t("Данных пока нет — значения сохраняются при опросе источника, не чаще раза в 5 минут"));
+  modal({ title: data.source.name, subtitle: t("Графики метрик"), body, wide: true });
+  if (series.length) load();
+}
+
+function sevBadge(sev) {
+  return h("span", { class: "badge " + sev }, SEV[sev] || sev);
+}
+
+function statusBadge(status) {
+  const cls = { new: "accent", acked: "warning", resolved: "ok" }[status] || "";
+  return h("span", { class: "badge " + cls }, STATUS[status] || status);
+}
+
+function emptyState(iconName, text) {
+  return h("div", { class: "empty" }, icon(iconName), h("div", null, text));
+}
+
+function loading() {
+  return h("div", { class: "empty" }, h("span", { class: "spinner" }));
+}
+
+function field(label, input, help) {
+  return h("div", { class: "field" }, h("label", null, label), input, help ? h("div", { class: "help" }, help) : null);
+}
+
+function input(props) {
+  return h("input", Object.assign({ type: "text" }, props));
+}
+
+function select(options, value, props = {}) {
+  return h(
+    "select",
+    props,
+    options.map(([v, t]) => h("option", { value: v, selected: String(v) === String(value) }, t))
+  );
+}
+
+function checkbox(label, checked, onchange) {
+  return h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!checked, onchange: (e) => onchange(e.target.checked) }), label);
+}
+
+function checkboxGroup(options, selected, onchange) {
+  const set = new Set((selected || []).map(String));
+  return h(
+    "div",
+    { class: "row" },
+    options.map(([v, t]) =>
+      checkbox(t, set.has(String(v)), (on) => {
+        if (on) set.add(String(v));
+        else set.delete(String(v));
+        onchange([...set]);
+      })
+    )
+  );
+}
+
+function copyField(value) {
+  const inp = input({ value, readonly: true });
+  return h(
+    "div",
+    { class: "copy-field" },
+    inp,
+    h("button", {
+      class: "btn",
+      type: "button",
+      onclick: async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+        } catch (e) {
+          inp.select();
+          document.execCommand("copy");
+        }
+        toast(t("Скопировано"));
+      },
+    }, icon("copy"))
+  );
+}
+
+function panel(title, actions, body, flush = false) {
+  return h(
+    "section",
+    { class: "panel" },
+    title || actions ? h("div", { class: "panel-head" }, h("h2", null, title), actions ? h("div", { class: "row" }, actions) : null) : null,
+    h("div", { class: "panel-body" + (flush ? " flush" : "") }, body)
+  );
+}
+
+function pageHead(title, subtitle, actions) {
+  return h("div", { class: "page-head" }, h("div", null, h("h1", null, title), subtitle ? h("p", null, subtitle) : null), actions ? h("div", { class: "row" }, actions) : null);
+}
+
+function roleOptions() {
+  return (S.meta.roles || []).map((r) => [r.name, r.title]);
+}
+
+function userOptions() {
+  return (S.meta.users || []).map((u) => [u.id, u.full_name ? `${u.full_name} (${u.username})` : u.username]);
+}
+
+function connectorOf(type) {
+  return (S.meta.connectors || []).find((c) => c.type === type) || { title: type, fields: [], category: "monitoring" };
+}
+
+const TABS = [
+  { id: "overview", title: t("Обзор"), show: () => true },
+  { id: "chat", title: t("Чат"), show: () => !!(S.meta && S.meta.chat_enabled), badge: "chat" },
+  { id: "monitoring", title: t("Мониторинг"), show: () => can("monitoring.view"), cat: "monitoring" },
+  { id: "databases", title: t("Базы данных"), show: () => can("databases.view"), cat: "database" },
+  { id: "onec", title: t("1С"), show: () => can("onec.view"), cat: "onec" },
+  { id: "backups", title: t("Бэкапы"), show: () => can("backups.view"), cat: "backup" },
+  { id: "bugs", title: t("Ошибки"), show: () => can("bugs.view") || can("bugs.report"), cat: "bug" },
+  { id: "journal", title: t("Журнал"), show: () => VIEW_PERMS.some(can) },
+  { sep: true, show: () => ["sources.manage", "rules.manage", "users.manage", "settings.manage"].some(can) },
+  { id: "sources", title: t("Источники"), show: () => can("sources.manage") },
+  { id: "rules", title: t("Правила"), show: () => can("rules.manage") },
+  { id: "users", title: t("Пользователи"), show: () => can("users.manage") },
+  { id: "settings", title: t("Настройки"), show: () => can("settings.manage") },
+];
+
+function allowedRoute(route) {
+  if (route === "profile") return true;
+  if (!S.me || S.me.status !== "active") return false;
+  const tab = TABS.find((t) => t.id === route);
+  return !!(tab && tab.show());
+}
+
+function navigate(route) {
+  if (location.hash !== "#/" + route) location.hash = "#/" + route;
+  else renderPage();
+}
+
+function applyTheme() {
+  const theme = store("ow_theme");
+  if (theme) document.documentElement.setAttribute("data-theme", theme);
+  else document.documentElement.removeAttribute("data-theme");
+}
+
+function cycleTheme() {
+  const order = ["", "light", "dark"];
+  const next = order[(order.indexOf(store("ow_theme")) + 1) % order.length];
+  store("ow_theme", next);
+  applyTheme();
+  toast("Тема: " + ({ "": t("как в системе"), light: t("светлая"), dark: t("тёмная") }[next]));
+}
+
+async function boot() {
+  applyTheme();
+  window.addEventListener("hashchange", onHash);
+  window.addEventListener("pywebviewready", syncBridge);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && S.route === "chat") chatMarkRead();
+  });
+  document.addEventListener("click", (e) => {
+    if (S.dropdown && !S.dropdown.contains(e.target) && !e.target.closest("[data-dropdown]")) closeDropdown();
+  });
+  try {
+    S.meta = await api("/api/meta");
+  } catch (e) {
+    S.meta = { registration_enabled: true, categories: [], severities: [] };
+  }
+  if (S.token) {
+    try {
+      S.me = await api("/api/auth/me");
+      if (await syncLanguage()) return;
+      S.meta = await api("/api/meta");
+    } catch (e) {
+      S.token = "";
+      store("ow_token", "");
+    }
+  }
+  render();
+}
+
+function onHash() {
+  const raw = location.hash.replace(/^#\/?/, "");
+  const [route, param] = raw.split("/");
+  if (route === "event" && param) {
+    if (S.me && S.me.status === "active") openEvent(Number(param));
+    history.replaceState(null, "", "#/" + S.route);
+    return;
+  }
+  if (!S.me) return;
+  if (route === "chat" && S.route === "chat" && CHAT.el && allowedRoute("chat")) {
+    chatSelect(param ? Number(param) : null);
+    return;
+  }
+  S.route = allowedRoute(route) ? route : S.me.status === "active" ? "overview" : "profile";
+  renderPage();
+}
+
+function render() {
+  const app = document.getElementById("app");
+  closeDropdown();
+  if (!S.me) {
+    stopTimers();
+    app.replaceChildren(authView());
+    return;
+  }
+  const raw = location.hash.replace(/^#\/?/, "");
+  const [route, param] = raw.split("/");
+  S.route = allowedRoute(route) ? route : S.me.status === "active" ? "overview" : "profile";
+  app.replaceChildren(topbar(), h("main", { class: "page", id: "page" }));
+  renderPage();
+  startTimers();
+  syncBridge();
+  if (route === "event" && param && S.me.status === "active") {
+    history.replaceState(null, "", "#/" + S.route);
+    openEvent(Number(param));
+  }
+}
+
+function topbar() {
+  const tabs = h("nav", { class: "tabs", id: "tabs" });
+  for (const tab of TABS) {
+    if (!tab.show()) continue;
+    if (S.me.status !== "active") continue;
+    if (tab.sep) {
+      tabs.append(h("span", { class: "tab-sep" }));
+      continue;
+    }
+    const count = tab.badge === "chat" ? h("span", { class: "count accent hidden", "data-chat-count": "1" }) : h("span", { class: "count hidden", "data-count": tab.cat || "" });
+    tabs.append(h("a", { class: "tab", href: "#/" + tab.id, "data-tab": tab.id }, tab.title, count));
+  }
+  const initials = (S.me.full_name || S.me.username).split(/\s+/).map((p) => p[0]).join("").slice(0, 2).toUpperCase();
+  return h(
+    "header",
+    { class: "topbar" },
+    h("a", { class: "brand", href: "#/overview" }, h("span", { class: "brand-mark" }, icon("eye")), h("span", null, "OpsWatch")),
+    tabs,
+    h(
+      "div",
+      { class: "top-actions" },
+      h("button", { class: "icon-btn", title: t("Уведомления"), "data-dropdown": "1", onclick: toggleNotifications }, icon("bell"), h("span", { class: "badge-dot hidden", id: "bell-count" })),
+      h("button", { class: "user-chip", "data-dropdown": "1", title: S.me.full_name || S.me.username, onclick: toggleUserMenu }, h("span", { class: "avatar" }, initials))
+    )
+  );
+}
+
+function highlightTabs() {
+  document.querySelectorAll(".tab").forEach((el) => el.classList.toggle("active", el.dataset.tab === S.route));
+}
+
+function updateBadges() {
+  const bell = document.getElementById("bell-count");
+  if (bell) {
+    bell.textContent = S.unread > 99 ? "99+" : String(S.unread);
+    bell.classList.toggle("hidden", !S.unread);
+  }
+  document.querySelectorAll("[data-chat-count]").forEach((el) => {
+    el.textContent = S.chatUnread > 99 ? "99+" : String(S.chatUnread);
+    el.classList.toggle("hidden", !S.chatUnread);
+  });
+  document.querySelectorAll("[data-count]").forEach((el) => {
+    const cat = el.dataset.count;
+    const n = cat && S.open[cat] ? S.open[cat].critical || 0 : 0;
+    el.textContent = String(n);
+    el.classList.toggle("hidden", !n);
+  });
+}
+
+function closeDropdown() {
+  if (S.dropdown) {
+    S.dropdown.remove();
+    S.dropdown = null;
+  }
+}
+
+function toggleUserMenu() {
+  if (S.dropdown && S.dropdown.dataset.kind === "user") return closeDropdown();
+  closeDropdown();
+  const item = (ic, text, fn) => h("a", { class: "menu-item", onclick: () => { closeDropdown(); fn(); } }, icon(ic), text);
+  S.dropdown = h(
+    "div",
+    { class: "dropdown", style: "width:260px" },
+    h("div", { class: "dropdown-head" }, h("div", { style: "font-weight:600" }, S.me.full_name || S.me.username), h("div", { class: "muted small" }, (S.me.role && S.me.role.title) || t("Без роли"), " · ", S.me.username)),
+    item("user", t("Профиль и уведомления"), () => navigate("profile")),
+    item("moon", t("Сменить тему"), cycleTheme),
+    item("globe", LANG === "ru" ? "English" : "Русский", () => setLanguage(LANG === "ru" ? "en" : "ru")),
+    bridge() ? item("server", t("Сменить сервер"), () => bridge().change_server()) : null,
+    item("logout", t("Выйти"), logout)
+  );
+  S.dropdown.dataset.kind = "user";
+  document.body.append(S.dropdown);
+}
+
+async function toggleNotifications() {
+  if (S.dropdown && S.dropdown.dataset.kind === "notif") return closeDropdown();
+  closeDropdown();
+  const list = h("div", { class: "dropdown-list" }, loading());
+  S.dropdown = h(
+    "div",
+    { class: "dropdown" },
+    h(
+      "div",
+      { class: "dropdown-head between" },
+      h("strong", null, t("Уведомления")),
+      h("button", {
+        class: "btn sm ghost",
+        onclick: async () => {
+          await guard(() => api("/api/notifications/read", { body: { all: true } }));
+          S.unread = 0;
+          updateBadges();
+          list.querySelectorAll(".notif").forEach((n) => n.classList.remove("unread"));
+        },
+      }, t("Прочитать все"))
+    ),
+    list
+  );
+  S.dropdown.dataset.kind = "notif";
+  document.body.append(S.dropdown);
+  const data = await guard(() => api("/api/notifications?limit=40"));
+  if (!data) return;
+  list.replaceChildren();
+  if (!data.items.length) list.append(emptyState("inbox", t("Уведомлений пока нет")));
+  for (const n of data.items) {
+    list.append(
+      h(
+        "div",
+        {
+          class: "notif" + (n.is_read ? "" : " unread"),
+          onclick: async () => {
+            closeDropdown();
+            if (!n.is_read) {
+              await api("/api/notifications/read", { body: { ids: [n.id] } }).catch(() => {});
+              S.unread = Math.max(0, S.unread - 1);
+              updateBadges();
+            }
+            if (n.event_id && S.me.status === "active") openEvent(n.event_id);
+          },
+        },
+        h("span", { class: "dot " + n.severity, style: "margin-top:6px" }),
+        h("div", { class: "grow" }, h("div", { class: "title" }, n.title), n.body ? h("div", { class: "muted small", style: "white-space:pre-line;max-height:3.2em;overflow:hidden" }, n.body) : null, h("div", { class: "faint small" }, ago(n.created_at)))
+      )
+    );
+  }
+}
+
+function startTimers() {
+  stopTimers();
+  poll();
+  S.pollTimer = setInterval(poll, 15000);
+  S.refreshTimer = setInterval(() => {
+    if (document.hidden || document.querySelector(".modal-backdrop")) return;
+    if (S.refresh) S.refresh();
+  }, 30000);
+}
+
+function stopTimers() {
+  clearInterval(S.pollTimer);
+  clearInterval(S.refreshTimer);
+  S.pollTimer = S.refreshTimer = null;
+}
+
+async function poll() {
+  if (!S.token) return;
+  let data;
+  try {
+    data = await api("/api/notifications/poll?after=" + S.lastNotif + "&chat_after=" + S.lastChat, { silent401: false });
+  } catch (e) {
+    return;
+  }
+  const isNew = S.lastNotif >= 0;
+  S.lastNotif = Math.max(data.last_id || 0, S.lastNotif, 0);
+  S.unread = data.unread || 0;
+  S.open = data.open || {};
+  const chat = data.chat || {};
+  const chatNew = S.lastChat >= 0;
+  S.lastChat = Math.max(chat.last_id || 0, S.lastChat, 0);
+  if (S.route !== "chat") S.chatUnread = chat.unread || 0;
+  updateBadges();
+  if (isNew && data.items.length && data.desktop && !bridge()) {
+    for (const n of data.items) browserNotify(n);
+  }
+  if (chatNew && S.route !== "chat" && data.desktop && !bridge()) {
+    for (const c of chat.items || []) browserNotify({ id: "c" + c.id, title: "💬 " + c.title, body: c.body, chat_room: c.room_id });
+  }
+}
+
+function browserNotify(n) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    const note = new Notification(n.title, { body: n.body || "", tag: "ow-" + n.id, icon: "/favicon.svg" });
+    note.onclick = () => {
+      window.focus();
+      if (n.chat_room) navigate("chat/" + n.chat_room);
+      else if (n.event_id) openEvent(n.event_id);
+      note.close();
+    };
+  } catch (e) {
+    return;
+  }
+}
+
+function syncBridge() {
+  const b = bridge();
+  if (!b) return;
+  try {
+    if (S.me && S.token) b.set_session(location.origin, S.token, !!S.me.notify_desktop, S.me.full_name || S.me.username);
+    else b.set_session(location.origin, "", false, "");
+  } catch (e) {
+    return;
+  }
+}
+
+function logoutLocal() {
+  chatStop();
+  S.token = "";
+  S.me = null;
+  S.lastNotif = -1;
+  S.lastChat = -1;
+  S.chatUnread = 0;
+  store("ow_token", "");
+  syncBridge();
+  render();
+}
+
+async function logout() {
+  await api("/api/auth/logout", { body: {} }).catch(() => {});
+  logoutLocal();
+}
+
+function authView() {
+  let mode = "login";
+  const box = h("div");
+  const notice = h("div");
+  const registration = S.meta && S.meta.registration_enabled;
+
+  function draw() {
+    box.replaceChildren(mode === "login" ? loginForm() : registerForm());
+    seg.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+  }
+
+  function loginForm() {
+    const u = input({ autocomplete: "username", placeholder: t("Логин"), required: true, autofocus: true });
+    const p = input({ type: "password", autocomplete: "current-password", placeholder: t("Пароль"), required: true });
+    const btn = h("button", { class: "btn primary block", type: "submit" }, t("Войти"));
+    return h(
+      "form",
+      {
+        onsubmit: async (e) => {
+          e.preventDefault();
+          btn.disabled = true;
+          try {
+            const r = await api("/api/auth/login", { body: { username: u.value.trim(), password: p.value } });
+            S.token = r.token;
+            store("ow_token", r.token);
+            S.me = r.user;
+            if (await syncLanguage()) return;
+            S.meta = await api("/api/meta");
+            render();
+          } catch (err) {
+            notice.replaceChildren(h("div", { class: "notice critical" }, icon("alert"), h("div", null, err.message)));
+          } finally {
+            btn.disabled = false;
+          }
+        },
+      },
+      field(t("Логин"), u),
+      field(t("Пароль"), p),
+      btn
+    );
+  }
+
+  function registerForm() {
+    const fn = input({ placeholder: t("Иван Петров"), autocomplete: "name" });
+    const u = input({ placeholder: "ivan.petrov", autocomplete: "username", required: true });
+    const p = input({ type: "password", autocomplete: "new-password", required: true });
+    const p2 = input({ type: "password", autocomplete: "new-password", required: true });
+    const tg = input({ placeholder: "@username" });
+    const btn = h("button", { class: "btn primary block", type: "submit" }, t("Отправить заявку"));
+    return h(
+      "form",
+      {
+        onsubmit: async (e) => {
+          e.preventDefault();
+          if (p.value !== p2.value) {
+            notice.replaceChildren(h("div", { class: "notice critical" }, icon("alert"), h("div", null, t("Пароли не совпадают"))));
+            return;
+          }
+          btn.disabled = true;
+          try {
+            const r = await api("/api/auth/register", { body: { full_name: fn.value, username: u.value.trim(), password: p.value, telegram_username: tg.value, language: LANG } });
+            mode = "login";
+            draw();
+            notice.replaceChildren(h("div", { class: "notice" }, icon("info"), h("div", null, r.message, t(" Вы уже можете войти и привязать Telegram в профиле."))));
+          } catch (err) {
+            notice.replaceChildren(h("div", { class: "notice critical" }, icon("alert"), h("div", null, err.message)));
+          } finally {
+            btn.disabled = false;
+          }
+        },
+      },
+      field(t("Имя и фамилия"), fn),
+      field(t("Логин"), u, t("Латиница, цифры, точка, дефис")),
+      h("div", { class: "grid-2", style: "gap:10px" }, field(t("Пароль"), p), field(t("Повторите пароль"), p2)),
+      field(t("Telegram (необязательно)"), tg),
+      btn
+    );
+  }
+
+  const seg = h(
+    "div",
+    { class: "segmented" },
+    h("button", { type: "button", "data-mode": "login", onclick: () => { mode = "login"; notice.replaceChildren(); draw(); } }, t("Вход")),
+    h("button", { type: "button", "data-mode": "register", disabled: !registration, onclick: () => { mode = "register"; notice.replaceChildren(); draw(); } }, t("Регистрация"))
+  );
+  draw();
+  return h(
+    "div",
+    { class: "auth-wrap" },
+    h(
+      "div",
+      { class: "auth-card" },
+      h("div", { class: "auth-brand" }, h("span", { class: "brand-mark" }, icon("eye")), h("h1", null, "OpsWatch"), h("div", { class: "muted" }, t("Мониторинг, резервные копии и уведомления для системных администраторов и 1С"))),
+      h("div", { class: "panel" }, h("div", { class: "panel-body" }, seg, notice, box)),
+      h(
+        "div",
+        { class: "row muted small", style: "justify-content:center;margin-top:14px" },
+        h("span", null, t("Сервер: ") + location.host),
+        h("span", null, "·"),
+        h("span", null, "v" + ((S.meta && S.meta.version) || "")),
+        h("span", null, "·"),
+        Object.entries(LANGS).map(([code, title]) => (code === LANG ? h("strong", null, title) : h("a", { href: "#", onclick: (e) => { e.preventDefault(); setLanguage(code, false); } }, title))),
+        bridge() ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); bridge().change_server(); } }, t("Сменить сервер")) : null
+      )
+    )
+  );
+}
+
+async function renderPage() {
+  const page = document.getElementById("page");
+  if (!page) return;
+  closeDropdown();
+  highlightTabs();
+  chatStop();
+  page.classList.toggle("page-chat", S.route === "chat");
+  S.refresh = null;
+  const seq = ++S.seq;
+  page.replaceChildren(loading());
+  const fn = PAGES[S.route] || PAGES.overview;
+  try {
+    const content = h("div");
+    await fn(content, seq);
+    if (seq !== S.seq) return;
+    page.replaceChildren(content);
+  } catch (e) {
+    if (seq !== S.seq) return;
+    page.replaceChildren(h("div", { class: "notice critical" }, icon("alert"), h("div", null, e.message)));
+  }
+}
+
+function eventsTable(items, opts = {}) {
+  if (!items.length) return emptyState("check", opts.empty || t("Событий нет"));
+  return h(
+    "div",
+    { class: "table-wrap" },
+    h(
+      "table",
+      { class: "table" },
+      h("thead", null, h("tr", null, h("th", null, t("Важность")), h("th", null, t("Событие")), opts.category === false ? null : h("th", null, t("Категория")), h("th", null, t("Статус")), h("th", { class: "right" }, t("Когда")))),
+      h(
+        "tbody",
+        null,
+        items.map((e) =>
+          h(
+            "tr",
+            { class: "clickable", onclick: () => openEvent(e.id) },
+            h("td", null, sevBadge(e.severity)),
+            h("td", { class: "title-cell" }, e.title, h("div", { class: "sub" }, [e.source_name, e.message].filter(Boolean).join(" · ")), e.attachments && e.attachments.length ? h("div", { class: "faint small" }, "📎 " + e.attachments.length) : null),
+            opts.category === false ? null : h("td", { class: "nowrap muted" }, CAT[e.category] || e.category),
+            h("td", null, statusBadge(e.status)),
+            h("td", { class: "right nowrap muted small" }, ago(e.last_seen_at), e.count > 1 ? h("div", null, "×" + e.count) : null)
+          )
+        )
+      )
+    )
+  );
+}
+
+function eventsPanel({ category = "", title = t("События"), allowCategoryFilter = false, defaultStatus = "open" }) {
+  const st = { status: defaultStatus, severity: "", q: "", offset: 0, limit: 50, category };
+  const body = h("div", null, loading());
+  const counter = h("span", { class: "muted small" });
+  const statusChips = h("div", { class: "chips" });
+  const sevChips = h("div", { class: "chips" });
+  const catChips = h("div", { class: "chips" });
+
+  function chips(container, options, key) {
+    container.replaceChildren(
+      ...options.map(([v, t]) =>
+        h("button", { class: "chip" + (st[key] === v ? " active" : ""), onclick: () => { st[key] = v; st.offset = 0; drawChips(); load(); } }, t)
+      )
+    );
+  }
+
+  function drawChips() {
+    chips(statusChips, [["open", t("Открытые")], ["", t("Все")], ["resolved", t("Решённые")]], "status");
+    chips(sevChips, [["", t("Любая важность")], ["critical", t("Критично")], ["warning", t("Предупреждения")], ["info", t("Информация")]], "severity");
+    if (allowCategoryFilter) {
+      const cats = (S.meta.categories || []).filter((c) => can({ monitoring: "monitoring.view", database: "databases.view", onec: "onec.view", backup: "backups.view", bug: "bugs.view", system: "system.view" }[c.id]));
+      chips(catChips, [["", t("Все категории")], ...cats.map((c) => [c.id, c.title])], "category");
+    }
+  }
+
+  let timer;
+  const search = input({
+    type: "search",
+    class: "search",
+    placeholder: t("Поиск…"),
+    oninput: (e) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { st.q = e.target.value; st.offset = 0; load(); }, 300);
+    },
+  });
+
+  async function load() {
+    const params = new URLSearchParams({ limit: st.limit, offset: st.offset });
+    if (st.category) params.set("category", st.category);
+    if (st.status) params.set("status", st.status);
+    if (st.severity) params.set("severity", st.severity);
+    if (st.q) params.set("q", st.q);
+    const data = await guard(() => api("/api/events?" + params));
+    if (!data) return;
+    counter.textContent = t("Всего: ") + data.total;
+    const pager =
+      data.total > st.limit
+        ? h(
+            "div",
+            { class: "pager" },
+            h("span", { class: "muted small" }, t("{from}–{to} из {total}", { from: st.offset + 1, to: Math.min(st.offset + st.limit, data.total), total: data.total })),
+            h(
+              "div",
+              { class: "row" },
+              h("button", { class: "btn sm", disabled: st.offset === 0, onclick: () => { st.offset = Math.max(0, st.offset - st.limit); load(); } }, t("Назад")),
+              h("button", { class: "btn sm", disabled: st.offset + st.limit >= data.total, onclick: () => { st.offset += st.limit; load(); } }, t("Вперёд"))
+            )
+          )
+        : null;
+    fill(body, eventsTable(data.items, { category: !category, empty: st.status === "open" ? t("Открытых событий нет — всё спокойно") : t("Событий не найдено") }), pager);
+  }
+
+  drawChips();
+  load();
+  const el = h(
+    "section",
+    { class: "panel" },
+    h("div", { class: "panel-head" }, h("div", { class: "row" }, h("h2", null, title), counter), h("div", { class: "row" }, search)),
+    h("div", { class: "panel-body", style: "padding-bottom:0;display:flex;flex-direction:column;gap:8px" }, h("div", { class: "row" }, statusChips, sevChips), allowCategoryFilter ? catChips : null),
+    h("div", { class: "panel-body flush", style: "margin-top:10px;border-top:1px solid var(--border)" }, body)
+  );
+  return { el, load };
+}
+
+function metricBadges(source) {
+  const m = source.metrics || {};
+  const items = [];
+  if (typeof m.size === "number") items.push(humanSize(m.size));
+  else if (m.size_human) items.push(m.size_human);
+  if (m.version) items.push(m.version);
+  if (m.latency_ms !== undefined) items.push(m.latency_ms + t(" мс"));
+  if (m.status) items.push("HTTP " + m.status);
+  if (m.problems !== undefined) items.push(t("Проблем: ") + m.problems);
+  if (m.in_use !== undefined) items.push(m.in_use ? t("Есть пользователи") : t("Пользователей нет"));
+  if (m.http) items.push(m.http);
+  if (m.log_matches) items.push(t("Ошибок в журнале: ") + m.log_matches);
+  if (m.received !== undefined) items.push(t("Получено: ") + m.received);
+  return items.map((t) => h("span", { class: "badge outline" }, t));
+}
+
+function sourceCard(source, reload, spark) {
+  const status = source.status || "unknown";
+  return h(
+    "div",
+    { class: "source-card" },
+    h("div", { class: "between" }, h("div", { class: "name" }, h("span", { class: "dot " + status }), source.name), source.enabled ? null : h("span", { class: "badge" }, t("Выключен"))),
+    h("div", { class: "muted small" }, source.type_title, " · ", SOURCE_STATUS[status] || status),
+    h("div", { class: "metrics" }, metricBadges(source)),
+    spark
+      ? h("button", { class: "spark-btn", title: t("Открыть график"), onclick: () => openMetrics(source) }, sparkline(spark.values, spark.title + t(" за 24 часа")), h("span", { class: "muted small" }, spark.title, t(" · 24 ч")))
+      : null,
+    source.last_error ? h("div", { class: "error-text" }, source.last_error.slice(0, 220)) : null,
+    h(
+      "div",
+      { class: "between" },
+      h("span", { class: "faint small" }, source.last_check_at ? t("Проверено ") + ago(source.last_check_at) : source.passive ? t("Принимает webhook") : t("Ещё не проверялся")),
+      h(
+        "div",
+        { class: "row", style: "gap:2px" },
+        source.passive ? null : h("button", { class: "btn sm ghost", title: t("Графики"), onclick: () => openMetrics(source) }, icon("chart")),
+      can("sources.manage") && !source.passive
+        ? h("button", {
+            class: "btn sm ghost",
+            onclick: async (e) => {
+              e.target.disabled = true;
+              const r = await guard(() => api(`/api/sources/${source.id}/poll`, { body: {} }));
+              if (r) toast(r.ok ? t("Проверено: ") + (r.message || "OK") : t("Ошибка: ") + r.message, r.ok ? "" : "error");
+              reload();
+            },
+          }, icon("refresh"), t("Проверить"))
+        : null
+      )
+    )
+  );
+}
+
+async function pageOverview(root) {
+  const d = await api("/api/dashboard");
+  let critical = 0;
+  let warning = 0;
+  let sourcesTotal = 0;
+  let sourcesOk = 0;
+  for (const [, c] of Object.entries(d.categories)) {
+    critical += c.open.critical || 0;
+    warning += c.open.warning || 0;
+    sourcesTotal += c.sources.total;
+    sourcesOk += c.sources.ok;
+  }
+  const backupsOk = d.backups.filter((b) => b.last_status === "ok").length;
+  const backupsFailed = d.backups.filter((b) => b.last_status === "failed").length;
+  append(root, pageHead(t("Обзор"), t("Состояние инфраструктуры и последние события"), h("button", { class: "btn", onclick: renderPage }, icon("refresh"), t("Обновить"))));
+  if (can("settings.manage") && d.bot.status !== "running") {
+    root.append(
+      h("div", { class: "notice warning" }, icon("alert"), h("div", null, d.bot.status === "error" ? t("Telegram-бот не запущен: ") + d.bot.error : t("Telegram-бот не настроен — уведомления приходят только в программу."), " ", h("a", { href: "#/settings" }, t("Открыть настройки"))))
+    );
+  }
+  if (S.me.username === "admin1" && S.me.is_superuser) {
+    root.append(h("div", { class: "notice" }, icon("shield"), h("div", null, t("Если вы ещё не меняли пароль администратора по умолчанию, сделайте это в "), h("a", { href: "#/profile" }, t("профиле")), ".")));
+  }
+  const kpi = (label, value, cls) => h("div", { class: "kpi" }, h("div", { class: "label" }, label), h("div", { class: "value " + (cls || "") }, value));
+  root.append(
+    h(
+      "div",
+      { class: "kpis" },
+      kpi(t("Критичных открыто"), critical, critical ? "critical" : "ok"),
+      kpi(t("Предупреждений"), warning, warning ? "warning" : ""),
+      kpi(t("Источники в норме"), sourcesTotal ? `${sourcesOk} / ${sourcesTotal}` : "—", sourcesTotal && sourcesOk === sourcesTotal ? "ok" : sourcesTotal ? "warning" : ""),
+      can("backups.view") ? kpi(t("Бэкапы"), d.backups.length ? `${backupsOk} / ${d.backups.length}` : "—", backupsFailed ? "critical" : d.backups.length ? "ok" : "") : null
+    )
+  );
+  const grid = h("div", { class: "cat-grid" });
+  for (const [cat, c] of Object.entries(d.categories)) {
+    const badges = ["critical", "warning", "info"].filter((s) => c.open[s]).map((s) => h("span", { class: "badge " + s }, `${SEV_SHORT[s]}: ${c.open[s]}`));
+    grid.append(
+      h(
+        "div",
+        { class: "cat-card", onclick: () => navigate(CAT_TAB[cat] || "journal") },
+        h("div", { class: "head" }, icon(CAT_ICON[cat]), CAT[cat]),
+        h("div", { class: "row" }, badges.length ? badges : h("span", { class: "badge ok" }, t("Всё спокойно"))),
+        c.sources.total ? h("div", { class: "muted small", style: "margin-top:8px" }, t("Источников: {n}", { n: c.sources.total }), c.sources.error ? h("span", { style: "color:var(--critical)" }, " · " + t("недоступно: {n}", { n: c.sources.error })) : null) : null
+      )
+    );
+  }
+  root.append(grid);
+  if (d.failing_sources.length) {
+    root.append(
+      panel(
+        t("Недоступные источники"),
+        null,
+        h("div", { class: "stack" }, d.failing_sources.map((s) => h("div", { class: "row" }, h("span", { class: "dot error" }), h("strong", null, s.name), h("span", { class: "muted small" }, s.error))))
+      )
+    );
+  }
+  root.append(panel(t("Последние события"), h("a", { href: "#/journal", class: "small" }, t("Весь журнал →")), eventsTable(d.recent, { empty: t("Событий пока нет") }), true));
+  S.refresh = renderPage;
+}
+
+function categoryPage(cat, title, subtitle) {
+  return async (root) => {
+    const sources = await api("/api/sources?category=" + cat);
+    const actions = can("sources.manage") ? h("button", { class: "btn", onclick: () => sourceForm(null, cat) }, icon("plus"), t("Источник")) : null;
+    append(root, pageHead(title, subtitle, actions));
+    const grid = h("div", { class: "sources-grid" });
+    let sparks = await api("/api/metrics/sparklines?category=" + cat).catch(() => ({}));
+    const drawSources = (items) => {
+      grid.replaceChildren(...items.map((s) => sourceCard(s, reloadSources, sparks[String(s.id)])));
+      grid.classList.toggle("hidden", !items.length);
+    };
+    const reloadSources = async () => {
+      const data = await api("/api/sources?category=" + cat).catch(() => null);
+      sparks = (await api("/api/metrics/sparklines?category=" + cat).catch(() => null)) || sparks;
+      if (data) drawSources(data.items);
+    };
+    drawSources(sources.items);
+    root.append(grid);
+    if (!sources.items.length) {
+      root.append(h("div", { class: "notice" }, icon("info"), h("div", null, t("Источники этой категории ещё не подключены."), can("sources.manage") ? t(" Добавьте их на вкладке «Источники».") : "")));
+    }
+    const events = eventsPanel({ category: cat, title: t("События") });
+    root.append(events.el);
+    S.refresh = () => {
+      reloadSources();
+      events.load();
+    };
+  };
+}
+
+async function pageJournal(root) {
+  append(root, pageHead(t("Журнал событий"), t("Все события, доступные вашей роли")));
+  const events = eventsPanel({ title: t("События"), allowCategoryFilter: true, defaultStatus: "" });
+  root.append(events.el);
+  S.refresh = events.load;
+}
+
+async function pageBugs(root) {
+  append(root, pageHead(t("Ошибки и баг-репорты"), t("Сообщения об ошибках от пользователей и систем")));
+  if (can("bugs.report")) {
+    const title = input({ placeholder: t("Кратко: что случилось") });
+    const text = h("textarea", { placeholder: t("Подробно: что делали, что ожидали, что получили. Можно указать базу, документ, время.") });
+    const sev = select([["info", t("Не срочно")], ["warning", t("Мешает работе")], ["critical", t("Работа остановлена")]], "warning");
+    const files = h("input", { type: "file", multiple: true, accept: "image/*,.txt,.log,.pdf,.zip,.7z,.json,.xml,.csv,.docx,.xlsx,.mxl,.epf,.erf" });
+    const btn = h("button", { class: "btn primary" }, icon("send"), t("Отправить"));
+    btn.onclick = async () => {
+      if (!title.value.trim() && !text.value.trim()) return toast(t("Опишите проблему"), "error");
+      const form = new FormData();
+      form.append("title", title.value);
+      form.append("text", text.value);
+      form.append("severity", sev.value);
+      for (const f of files.files) form.append("files", f);
+      btn.disabled = true;
+      const r = await guard(() => api("/api/bugs", { body: form }), t("Баг-репорт отправлен"));
+      btn.disabled = false;
+      if (r) {
+        title.value = "";
+        text.value = "";
+        files.value = "";
+        if (S.refresh) S.refresh();
+      }
+    };
+    const hint = S.meta.bot_username ? h("span", { class: "muted small" }, t("Или отправьте боту "), h("a", { href: `https://t.me/${S.meta.bot_username}`, target: "_blank" }, "@" + S.meta.bot_username), t(" команду /bug со скриншотом")) : null;
+    root.append(
+      panel(
+        t("Сообщить об ошибке"),
+        null,
+        h("div", null, h("div", { class: "grid-2" }, field(t("Заголовок"), title), field(t("Срочность"), sev)), field(t("Описание"), text), field(t("Скриншоты и файлы"), files, t("До 5 файлов, не больше 20 МБ каждый")), h("div", { class: "between" }, hint || h("span"), btn))
+      )
+    );
+  }
+  if (can("bugs.view")) {
+    const events = eventsPanel({ category: "bug", title: t("Баг-репорты") });
+    root.append(events.el);
+    S.refresh = events.load;
+  } else {
+    const box = h("div", null, loading());
+    root.append(panel(t("Мои обращения"), null, box, true));
+    const load = async () => {
+      const data = await guard(() => api("/api/bugs/mine"));
+      if (data) box.replaceChildren(eventsTable(data.items, { category: false, empty: t("Вы ещё не отправляли баг-репорты") }));
+    };
+    load();
+    S.refresh = load;
+  }
+}
+
+async function openEvent(id) {
+  let e;
+  try {
+    e = await api("/api/events/" + id);
+  } catch (err) {
+    toast(err.message, "error");
+    return;
+  }
+  const note = h("textarea", { placeholder: t("Комментарий к решению (необязательно)"), style: "min-height:60px" });
+  const manage = can("events.manage") && e.status !== "resolved";
+  const kv = (k, v) => (v === null || v === undefined || v === "" ? null : [h("div", { class: "k" }, k), h("div", null, v)]);
+  const attachments = (e.attachments || []).map((a) => {
+    const url = a.url + "?access_token=" + encodeURIComponent(S.token);
+    const isImage = (a.content_type || "").startsWith("image/");
+    return h("div", null, h("a", { href: url, target: "_blank" }, "📎 " + a.filename), h("span", { class: "muted small" }, " · " + humanSize(a.size)), isImage ? h("img", { class: "attachment-preview", src: url, alt: a.filename }) : null);
+  });
+  const details = Object.entries(e.details || {});
+  const body = h(
+    "div",
+    { class: "stack" },
+    h("div", { class: "row" }, sevBadge(e.severity), statusBadge(e.status), h("span", { class: "badge outline" }, CAT[e.category] || e.category), e.escalation_level ? h("span", { class: "badge critical" }, t("Эскалация: ") + e.escalation_level) : null),
+    h(
+      "div",
+      { class: "kv" },
+      kv(t("Источник"), e.source_name),
+      kv(t("Тип"), h("code", null, e.type)),
+      kv(t("Впервые"), fmtDate(e.created_at, true)),
+      kv(t("Последний раз"), fmtDate(e.last_seen_at, true)),
+      kv(t("Повторов"), e.count > 1 ? String(e.count) : null),
+      kv(t("Отправитель"), e.reporter),
+      kv(t("Принял"), e.acked_by ? `${e.acked_by}, ${fmtDate(e.acked_at)}` : null),
+      kv(t("Решил"), e.resolved_at ? `${e.resolved_by || t("автоматически")}, ${fmtDate(e.resolved_at)}` : null)
+    ),
+    e.message ? h("pre", null, e.message) : null,
+    e.resolution ? h("div", { class: "notice" }, icon("check"), h("div", null, e.resolution)) : null,
+    details.length ? h("details", null, h("summary", { class: "muted small", style: "cursor:pointer" }, t("Технические детали")), h("div", { class: "kv", style: "margin-top:8px" }, details.map(([k, v]) => kv(k, typeof v === "object" ? JSON.stringify(v) : String(v))))) : null,
+    attachments.length ? h("div", { class: "stack" }, h("div", { class: "label" }, t("Вложения")), attachments) : null,
+    manage ? field(t("Комментарий"), note) : null
+  );
+  const actions = [];
+  if (S.meta.chat_enabled) {
+    actions.push(h("button", { class: "btn", style: "margin-right:auto", onclick: () => { m.close(); shareEventDialog(e); } }, icon("message"), t("Обсудить в чате")));
+  }
+  if (manage && e.status === "new") {
+    actions.push(h("button", { class: "btn", onclick: async () => { const r = await guard(() => api(`/api/events/${id}/ack`, { body: {} }), t("Принято в работу")); if (r) { m.close(); openEvent(id); if (S.refresh) S.refresh(); } } }, icon("check"), t("Принял")));
+  }
+  if (manage) {
+    actions.push(h("button", { class: "btn primary", onclick: async () => { const r = await guard(() => api(`/api/events/${id}/resolve`, { body: { note: note.value } }), t("Событие закрыто")); if (r) { m.close(); if (S.refresh) S.refresh(); } } }, icon("check"), t("Решено")));
+  }
+  const m = modal({ title: e.title, subtitle: "#" + e.id, body, foot: actions, wide: true });
+}
+
+async function pageBackups(root) {
+  const manage = can("backups.manage");
+  append(root, pageHead(t("Резервное копирование"), t("Задания по расписанию, проверка архивов и отправка администраторам"), manage ? h("button", { class: "btn primary", onclick: () => jobForm(null) }, icon("plus"), t("Новое задание")) : null));
+  const jobsBox = h("div", null, loading());
+  const recordsBox = h("div", null, loading());
+  root.append(panel(t("Задания"), null, jobsBox, true));
+  root.append(panel(t("История"), null, recordsBox, true));
+  let jobs = [];
+
+  async function load() {
+    const [j, r] = await Promise.all([api("/api/backups/jobs"), api("/api/backups/records?limit=60")]);
+    jobs = j.items;
+    if (!jobs.length) {
+      jobsBox.replaceChildren(emptyState("archive", manage ? t("Заданий пока нет. Создайте первое задание резервного копирования.") : t("Заданий пока нет")));
+    } else {
+      jobsBox.replaceChildren(
+        h(
+          "div",
+          { class: "table-wrap" },
+          h(
+            "table",
+            { class: "table" },
+            h("thead", null, h("tr", null, h("th", null, t("Задание")), h("th", null, t("Расписание")), h("th", null, t("Последний запуск")), h("th", null, t("Хранить")), manage ? h("th", { class: "right" }, "") : null)),
+            h(
+              "tbody",
+              null,
+              jobs.map((job) => {
+                const st = job.last_status;
+                const cls = { ok: "ok", failed: "critical", running: "accent" }[st] || "";
+                return h(
+                  "tr",
+                  null,
+                  h("td", { class: "title-cell" }, job.name, h("div", { class: "sub" }, job.source_name || t("источник удалён"), job.encrypt ? " · 🔒 AES-256" : "", job.enabled ? "" : t(" · выключено"))),
+                  h("td", null, h("code", null, job.schedule), h("div", { class: "muted small" }, job.next_run ? t("След.: ") + fmtDate(job.next_run) : "")),
+                  h("td", null, h("span", { class: "badge " + cls }, st === "running" ? h("span", { class: "spinner", style: "width:10px;height:10px" }) : null, BACKUP_STATUS[st] || st), h("div", { class: "muted small" }, job.last_run_at ? ago(job.last_run_at) : ""), job.last_error ? h("div", { class: "small", style: "color:var(--critical);max-width:340px" }, job.last_error.slice(0, 200)) : null),
+                  h("td", { class: "muted" }, job.keep_last ? job.keep_last + t(" шт.") : t("все")),
+                  manage
+                    ? h(
+                        "td",
+                        { class: "right nowrap" },
+                        h("button", { class: "btn sm", disabled: job.running, onclick: async () => { const r = await guard(() => api(`/api/backups/jobs/${job.id}/run`, { body: {} }), t("Бэкап запущен")); if (r) setTimeout(load, 800); } }, icon("play"), t("Запустить")),
+                        " ",
+                        h("button", { class: "btn sm ghost", title: t("Изменить"), onclick: () => jobForm(job) }, icon("edit")),
+                        h("button", { class: "btn sm ghost danger", title: t("Удалить"), onclick: () => confirmDialog(t("Удалить задание «{name}»? Файлы бэкапов останутся на диске.", { name: job.name }), async () => { await guard(() => api(`/api/backups/jobs/${job.id}`, { method: "DELETE" }), t("Задание удалено")); load(); }) }, icon("trash"))
+                      )
+                    : null
+                );
+              })
+            )
+          )
+        )
+      );
+    }
+    const names = Object.fromEntries(jobs.map((x) => [x.id, x.name]));
+    if (!r.items.length) {
+      recordsBox.replaceChildren(emptyState("inbox", t("Резервных копий ещё не было")));
+    } else {
+      recordsBox.replaceChildren(
+        h(
+          "div",
+          { class: "table-wrap" },
+          h(
+            "table",
+            { class: "table" },
+            h("thead", null, h("tr", null, h("th", null, t("Дата")), h("th", null, t("Задание")), h("th", null, t("Размер")), h("th", null, t("Проверка")), h("th", null, t("Доставка")), h("th", null, t("Статус")), h("th", { class: "right" }, ""))),
+            h(
+              "tbody",
+              null,
+              r.items.map((rec) => {
+                const tg = (rec.delivery || {}).telegram;
+                const delivery = [];
+                if (tg) delivery.push(tg.mode === "no_bot" ? t("Telegram: бот не настроен") : `Telegram: ${tg.sent}${tg.failed ? ", " + t("ошибок {n}", { n: tg.failed }) : ""}${tg.mode === "parts" ? " " + t("(частями)") : tg.mode === "link" ? " " + t("(ссылка)") : ""}`);
+                if (rec.delivery && rec.delivery.folder) delivery.push(rec.delivery.folder.error ? t("Папка: ошибка") : t("Папка ✓"));
+                if (rec.delivery && rec.delivery.s3) delivery.push(rec.delivery.s3.error ? t("S3: ошибка") : "S3 ✓");
+                const cls = { ok: "ok", failed: "critical", running: "accent" }[rec.status] || "";
+                return h(
+                  "tr",
+                  null,
+                  h("td", { class: "nowrap" }, fmtDate(rec.started_at), rec.manual ? h("div", { class: "faint small" }, t("вручную")) : null),
+                  h("td", null, names[rec.job_id] || "#" + rec.job_id, rec.file_name ? h("div", { class: "faint small mono" }, rec.file_name) : null),
+                  h("td", { class: "nowrap" }, rec.size ? humanSize(rec.size) : "—"),
+                  h("td", null, rec.verified ? h("span", { class: "badge ok" }, t("Целостность OK")) : h("span", { class: "muted" }, "—")),
+                  h("td", { class: "muted small" }, delivery.join(" · ") || "—"),
+                  h("td", null, h("span", { class: "badge " + cls }, BACKUP_STATUS[rec.status] || rec.status), rec.deleted ? h("div", { class: "faint small" }, t("удалён ротацией")) : null, rec.error ? h("div", { class: "small", style: "color:var(--critical);max-width:320px" }, rec.error.slice(0, 240)) : null),
+                  h("td", { class: "right" }, manage && rec.available ? h("a", { class: "btn sm ghost", href: `/api/backups/records/${rec.id}/download?access_token=${encodeURIComponent(S.token)}` }, icon("download")) : null)
+                );
+              })
+            )
+          )
+        )
+      );
+    }
+    if (jobs.some((x) => x.running)) setTimeout(() => { if (S.route === "backups") load(); }, 4000);
+  }
+  await load();
+  S.refresh = load;
+}
+
+function jobForm(job) {
+  const backupTypes = new Set((S.meta.connectors || []).filter((c) => c.supports_backup).map((c) => c.type));
+  const sources = (S.meta.sources || []).filter((s) => backupTypes.has(s.type));
+  if (!sources.length) {
+    toast(t("Сначала добавьте источник: MySQL, PostgreSQL, MS SQL или базу 1С"), "error");
+    return;
+  }
+  const d = job
+    ? JSON.parse(JSON.stringify(job))
+    : { name: "", source_id: sources[0].id, schedule: "0 2 * * *", enabled: true, keep_last: 7, encrypt: true, options: {}, destinations: { telegram: true, split: true } };
+  d.options = d.options || {};
+  d.destinations = Object.assign({ telegram: true, split: true }, d.destinations || {});
+  const password = input({ type: "password", placeholder: job && job.has_password ? t("•••••••• (не менять)") : t("Пароль архива"), autocomplete: "new-password" });
+  const sched = input({ value: d.schedule, class: "mono", oninput: (e) => (d.schedule = e.target.value) });
+  const optsBox = h("div");
+  const presets = [["0 2 * * *", t("Ежедневно 02:00")], ["0 */6 * * *", t("Каждые 6 ч")], ["0 22 * * 1-5", t("Будни 22:00")], ["0 3 * * 0", t("Вс 03:00")]];
+
+  function drawOptions() {
+    const source = sources.find((s) => String(s.id) === String(d.source_id));
+    const type = source ? source.type : "";
+    const opt = (key, label, help, placeholder) => field(label, input({ value: d.options[key] || "", placeholder: placeholder || "", oninput: (e) => (d.options[key] = e.target.value) }), help);
+    const items = [];
+    if (type === "mysql") items.push(opt("tool_path", t("Путь к mysqldump"), t("Пусто — из общих настроек"), "C:\\Program Files\\MySQL\\bin\\mysqldump.exe"));
+    if (type === "postgresql") items.push(opt("tool_path", t("Путь к pg_dump"), t("Пусто — из общих настроек"), "C:\\Program Files\\PostgreSQL\\16\\bin\\pg_dump.exe"));
+    if (type === "mssql" || type === "onec_server") {
+      items.push(opt("server_dir", t("Каталог для .bak на сервере SQL (для MS SQL)"), t("Путь, доступный службе SQL Server"), "D:\\Backup"));
+      items.push(opt("local_dir", t("Тот же каталог, доступный OpsWatch"), t("Например, сетевой путь. Пусто — совпадает с каталогом на сервере"), "\\\\sql01\\Backup"));
+    }
+    if (type === "onec_server") items.push(opt("tool_path", t("Путь к pg_dump (для PostgreSQL)"), t("Пусто — из общих настроек")));
+    if (type === "onec_file") {
+      items.push(checkbox(t("Использовать теневое копирование (VSS), если база занята"), d.options.use_vss, (v) => (d.options.use_vss = v)));
+      items.push(checkbox(t("Добавить журнал регистрации в архив"), d.options.include_log, (v) => (d.options.include_log = v)));
+      items.push(h("div", { class: "help small muted" }, t("Без VSS бэкап выполняется только когда в базе нет пользователей. VSS требует запуска от имени администратора.")));
+    }
+    optsBox.replaceChildren(...items);
+  }
+
+  const body = h(
+    "div",
+    null,
+    h("div", { class: "grid-2" }, field(t("Название"), input({ value: d.name, placeholder: t("Бухгалтерия — ночной бэкап"), oninput: (e) => (d.name = e.target.value) })), field(t("Источник"), select(sources.map((s) => [s.id, `${s.name} (${connectorOf(s.type).title})`]), d.source_id, { onchange: (e) => { d.source_id = Number(e.target.value); drawOptions(); } }))),
+    field(t("Расписание (cron: минута час день месяц день_недели)"), sched),
+    h("div", { class: "chips", style: "margin:-4px 0 12px" }, presets.map(([v, t]) => h("button", { class: "chip", type: "button", onclick: () => { sched.value = v; d.schedule = v; } }, t))),
+    h("div", { class: "grid-2" }, field(t("Сколько копий хранить локально"), input({ type: "number", min: 0, value: d.keep_last, oninput: (e) => (d.keep_last = Number(e.target.value)) }), t("0 — хранить все")), field(t("Пароль шифрования (AES-256)"), password)),
+    h("div", { class: "row", style: "margin-bottom:12px" }, checkbox(t("Шифровать архив"), d.encrypt, (v) => (d.encrypt = v)), checkbox(t("Задание включено"), d.enabled, (v) => (d.enabled = v))),
+    h("fieldset", null, h("legend", null, t("Параметры источника")), optsBox),
+    h(
+      "fieldset",
+      null,
+      h("legend", null, t("Доставка")),
+      h("div", { class: "row" }, checkbox(t("Отправлять в Telegram"), d.destinations.telegram, (v) => (d.destinations.telegram = v)), checkbox(t("Делить большие файлы на части"), d.destinations.split, (v) => (d.destinations.split = v)), checkbox(t("Выгружать в S3"), d.destinations.s3, (v) => (d.destinations.s3 = v))),
+      field(t("Кому отправлять (роли)"), checkboxGroup(roleOptions(), d.destinations.telegram_roles, (v) => (d.destinations.telegram_roles = v)), t("Если не выбрано — всем, у кого есть право управления бэкапами")),
+      field(t("Кому отправлять (пользователи)"), checkboxGroup(userOptions(), d.destinations.telegram_users, (v) => (d.destinations.telegram_users = v.map(Number)))),
+      field(t("Копировать в папку (сетевую)"), input({ value: d.destinations.folder || "", placeholder: "\\\\nas\\backup\\opswatch", oninput: (e) => (d.destinations.folder = e.target.value) }))
+    )
+  );
+  drawOptions();
+  const m = modal({
+    title: job ? t("Задание резервного копирования") : t("Новое задание"),
+    body,
+    wide: true,
+    foot: [
+      h("button", { class: "btn", onclick: () => m.close() }, t("Отмена")),
+      h("button", {
+        class: "btn primary",
+        onclick: async () => {
+          const payload = Object.assign({}, d, { password: password.value });
+          const r = await guard(() => api(job ? `/api/backups/jobs/${job.id}` : "/api/backups/jobs", { method: job ? "PUT" : "POST", body: payload }), t("Сохранено"));
+          if (r) {
+            m.close();
+            renderPage();
+          }
+        },
+      }, t("Сохранить")),
+    ],
+  });
+}
+
+async function pageSources(root) {
+  append(root, pageHead(t("Источники"), t("Базы данных, 1С, системы мониторинга и webhook-и"), h("button", { class: "btn primary", onclick: () => sourceForm(null) }, icon("plus"), t("Добавить источник"))));
+  const data = await api("/api/sources");
+  if (!data.items.length) {
+    root.append(panel(null, null, emptyState("server", t("Источников пока нет. Подключите базу данных, 1С или систему мониторинга."))));
+    return;
+  }
+  root.append(
+    panel(
+      null,
+      null,
+      h(
+        "div",
+        { class: "table-wrap" },
+        h(
+          "table",
+          { class: "table" },
+          h("thead", null, h("tr", null, h("th", null, t("Источник")), h("th", null, t("Категория")), h("th", null, t("Статус")), h("th", null, t("Опрос")), h("th", null, t("Доступ")), h("th", { class: "right" }, ""))),
+          h(
+            "tbody",
+            null,
+            data.items.map((s) =>
+              h(
+                "tr",
+                null,
+                h("td", { class: "title-cell" }, s.name, h("div", { class: "sub" }, s.type_title)),
+                h("td", { class: "muted" }, CAT[s.category] || s.category),
+                h("td", null, h("div", { class: "row" }, h("span", { class: "dot " + s.status }), SOURCE_STATUS[s.status] || s.status), s.last_error ? h("div", { class: "small", style: "color:var(--critical);max-width:300px" }, s.last_error.slice(0, 160)) : null),
+                h("td", { class: "muted small nowrap" }, s.passive ? "webhook" : t("каждые {n} с", { n: s.poll_interval }), s.last_check_at ? h("div", null, ago(s.last_check_at)) : null),
+                h("td", { class: "muted small" }, s.visible_roles.length ? s.visible_roles.map((r) => (S.meta.roles.find((x) => x.name === r) || { title: r }).title).join(", ") : t("Все по правам")),
+                h(
+                  "td",
+                  { class: "right nowrap" },
+                  !s.passive ? h("button", { class: "btn sm ghost", title: t("Графики"), onclick: () => openMetrics(s) }, icon("chart")) : null,
+                  !s.passive ? h("button", { class: "btn sm ghost", title: t("Проверить сейчас"), onclick: async () => { const r = await guard(() => api(`/api/sources/${s.id}/poll`, { body: {} })); if (r) toast(r.ok ? "OK: " + r.message : t("Ошибка: ") + r.message, r.ok ? "" : "error"); renderPage(); } }, icon("refresh")) : null,
+                  h("button", { class: "btn sm ghost", title: t("Изменить"), onclick: () => sourceForm(s) }, icon("edit")),
+                  h("button", { class: "btn sm ghost danger", title: t("Удалить"), onclick: () => confirmDialog(t("Удалить источник «{name}»? История событий сохранится.", { name: s.name }), async () => { await guard(() => api(`/api/sources/${s.id}`, { method: "DELETE" }), t("Источник удалён")); S.meta = await api("/api/meta"); renderPage(); }) }, icon("trash"))
+                )
+              )
+            )
+          )
+        )
+      ),
+      true
+    )
+  );
+  S.refresh = renderPage;
+}
+
+function sourceForm(existing, presetCategory) {
+  if (existing) return sourceEditor(existing.type, existing);
+  const connectors = (S.meta.connectors || []).filter((c) => !presetCategory || c.category === presetCategory || (presetCategory === "monitoring" && c.passive));
+  const m = modal({
+    title: t("Новый источник"),
+    subtitle: t("Выберите тип подключения"),
+    wide: true,
+    body: h(
+      "div",
+      { class: "cat-grid", style: "margin:0" },
+      connectors.map((c) =>
+        h(
+          "div",
+          { class: "cat-card", onclick: () => { m.close(); sourceEditor(c.type, null); } },
+          h("div", { class: "head" }, icon(CAT_ICON[c.category] || "server"), c.title),
+          h("div", { class: "muted small" }, c.description)
+        )
+      )
+    ),
+  });
+}
+
+function renderInput(spec, cfg) {
+  const value = cfg[spec.name] !== undefined && cfg[spec.name] !== null ? cfg[spec.name] : spec.default !== null && spec.default !== undefined ? spec.default : "";
+  if (spec.type === "bool") {
+    if (cfg[spec.name] === undefined && spec.default !== null) cfg[spec.name] = !!spec.default;
+    return checkbox(spec.label, !!value, (v) => (cfg[spec.name] = v));
+  }
+  let el;
+  if (spec.type === "select") {
+    el = select(spec.options || [], value, { onchange: (e) => (cfg[spec.name] = e.target.value) });
+    if (cfg[spec.name] === undefined) cfg[spec.name] = value;
+  } else if (spec.type === "textarea") {
+    el = h("textarea", { value, oninput: (e) => (cfg[spec.name] = e.target.value) });
+  } else {
+    el = input({
+      type: spec.type === "password" ? "password" : spec.type === "number" ? "number" : "text",
+      value,
+      placeholder: spec.placeholder || "",
+      autocomplete: spec.type === "password" ? "new-password" : "off",
+      class: spec.type === "path" ? "mono" : null,
+      oninput: (e) => (cfg[spec.name] = spec.type === "number" && e.target.value !== "" ? Number(e.target.value) : e.target.value),
+    });
+  }
+  return field(spec.label + (spec.required ? " *" : ""), el, spec.help);
+}
+
+function checksEditor(cfg, ctx) {
+  cfg.checks = Array.isArray(cfg.checks) ? cfg.checks : [];
+  const box = h("div");
+  function draw() {
+    box.replaceChildren(
+      ...cfg.checks.map((c, i) => {
+        const extra = h("div", { class: "grid-3" });
+        const preview = h("div");
+        function drawExtra() {
+          const items = [];
+          if (c.mode === "new_rows") items.push(field(t("Ключевая колонка"), input({ value: c.key_column || "", placeholder: "id", oninput: (e) => (c.key_column = e.target.value) })));
+          if (c.mode === "threshold") {
+            items.push(field(t("Условие тревоги"), select([[">", t("больше")], [">=", t("больше или равно")], ["<", t("меньше")], ["<=", t("меньше или равно")], ["==", t("равно")], ["!=", t("не равно")]], c.operator || ">", { onchange: (e) => (c.operator = e.target.value) })));
+            items.push(field(t("Порог"), input({ type: "number", value: c.threshold ?? 0, oninput: (e) => (c.threshold = Number(e.target.value)) })));
+          }
+          items.push(field(t("Шаблон заголовка"), input({ value: c.title || "", placeholder: c.mode === "new_rows" ? t("Новый заказ №{id}") : "", oninput: (e) => (c.title = e.target.value) })));
+          extra.replaceChildren(...items);
+        }
+        if (!c.mode) c.mode = "threshold";
+        if (!c.severity) c.severity = "warning";
+        drawExtra();
+        return h(
+          "div",
+          { class: "check-row" },
+          h(
+            "div",
+            { class: "grid-3" },
+            field(t("Название"), input({ value: c.name || "", placeholder: t("Очередь заданий"), oninput: (e) => (c.name = e.target.value) })),
+            field(t("Режим"), select([["new_rows", t("Новые записи")], ["threshold", t("Порог значения")], ["rows_exist", t("Есть строки — тревога")]], c.mode, { onchange: (e) => { c.mode = e.target.value; drawExtra(); } })),
+            field(t("Важность"), select([["info", t("Информация")], ["warning", t("Предупреждение")], ["critical", t("Критично")]], c.severity, { onchange: (e) => (c.severity = e.target.value) }))
+          ),
+          field(t("SQL-запрос (только SELECT)"), h("textarea", { class: "code", value: c.query || "", placeholder: c.mode === "new_rows" ? "SELECT id, number, total FROM orders ORDER BY id DESC LIMIT 50" : "SELECT COUNT(*) FROM jobs WHERE status = 'failed'", oninput: (e) => (c.query = e.target.value) })),
+          extra,
+          h(
+            "div",
+            { class: "between" },
+            checkbox(t("Включена"), c.enabled !== false, (v) => (c.enabled = v)),
+            h(
+              "div",
+              { class: "row" },
+              h("button", {
+                class: "btn sm",
+                type: "button",
+                onclick: async () => {
+                  preview.replaceChildren(loading());
+                  const r = await guard(() => api("/api/sources/preview-check", { body: Object.assign({}, ctx(), { check: c }) }));
+                  if (!r) return preview.replaceChildren();
+                  if (!r.ok) return preview.replaceChildren(h("div", { class: "notice critical" }, icon("alert"), h("div", null, r.message)));
+                  const cols = r.rows.length ? Object.keys(r.rows[0]) : [];
+                  fill(
+                    preview,
+                    h("div", { class: "muted small", style: "margin:8px 0 4px" }, r.message),
+                    cols.length
+                      ? h("div", { class: "table-wrap" }, h("table", { class: "table" }, h("thead", null, h("tr", null, cols.map((k) => h("th", null, k)))), h("tbody", null, r.rows.slice(0, 10).map((row) => h("tr", null, cols.map((k) => h("td", { class: "small" }, String(row[k] ?? ""))))))))
+                      : null
+                  );
+                },
+              }, t("Проверить запрос")),
+              h("button", { class: "btn sm danger", type: "button", onclick: () => { cfg.checks.splice(i, 1); draw(); } }, icon("trash"))
+            )
+          ),
+          preview
+        );
+      }),
+      h("button", { class: "btn", type: "button", onclick: () => { cfg.checks.push({ name: "", mode: "threshold", severity: "warning", enabled: true, operator: ">", threshold: 0 }); draw(); } }, icon("plus"), t("Добавить проверку"))
+    );
+  }
+  draw();
+  return box;
+}
+
+function ingestHelp(type, url) {
+  if (type === "zabbix_webhook") {
+    return h("div", { class: "stack small" }, h("div", null, t("В Zabbix: Оповещения → Способы оповещений → Создать → тип «Webhook». Вставьте скрипт из файла "), h("code", null, "examples/zabbix_webhook.js"), t(", параметр URL — адрес выше.")), h("div", { class: "muted" }, t("Параметры: event_id={EVENT.ID}, event_value={EVENT.VALUE}, severity={EVENT.SEVERITY}, host={HOST.NAME}, trigger_name={EVENT.NAME}, message={ALERT.MESSAGE}.")));
+  }
+  if (type === "alertmanager") {
+    return h("div", { class: "stack small" }, h("div", null, t("В alertmanager.yml добавьте получателя:")), h("pre", null, `receivers:\n  - name: opswatch\n    webhook_configs:\n      - url: "${url}"\n        send_resolved: true`));
+  }
+  return h("div", { class: "stack small" }, h("div", null, t("Отправьте POST с JSON:")), h("pre", null, `curl -X POST "${url}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"title":"Disk C: is full","message":"C: 95%","severity":"critical","category":"monitoring"}'`), h("div", { class: "muted" }, 'Для закрытия события отправьте тот же "external_id" со "status": "resolved". Для баг-репортов укажите "category": "bug".'));
+}
+
+function sourceEditor(type, existing) {
+  const conn = connectorOf(type);
+  const d = existing
+    ? { name: existing.name, category: existing.category, enabled: existing.enabled, poll_interval: existing.poll_interval, visible_roles: [...existing.visible_roles], config: JSON.parse(JSON.stringify(existing.config || {})) }
+    : { name: "", category: conn.category, enabled: true, poll_interval: conn.default_interval || 60, visible_roles: [], config: {} };
+  const result = h("div");
+  const ctx = () => ({ id: existing ? existing.id : null, name: d.name, type, category: d.category, config: d.config });
+  const groups = new Map();
+  for (const spec of conn.fields) {
+    const g = spec.group || t("Параметры");
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(spec);
+  }
+  const fieldsets = [];
+  for (const [name, specs] of groups) {
+    fieldsets.push(h("fieldset", null, h("legend", null, name), h("div", { class: "form-grid" }, specs.map((spec) => (spec.type === "checks" ? h("div", { class: "span-all" }, checksEditor(d.config, ctx)) : renderInput(spec, d.config))))));
+  }
+  const body = h(
+    "div",
+    null,
+    h("div", { class: "muted small", style: "margin-bottom:12px" }, conn.description),
+    h(
+      "div",
+      { class: "grid-2" },
+      field(t("Название *"), input({ value: d.name, placeholder: conn.title, oninput: (e) => (d.name = e.target.value) })),
+      field(t("Категория"), select((S.meta.categories || []).map((c) => [c.id, c.title]), d.category, { onchange: (e) => (d.category = e.target.value) }))
+    ),
+    h(
+      "div",
+      { class: "grid-2" },
+      conn.passive ? h("div") : field(t("Интервал опроса, сек"), input({ type: "number", min: 15, value: d.poll_interval, oninput: (e) => (d.poll_interval = Number(e.target.value)) })),
+      field(t("Состояние"), checkbox(t("Источник включён"), d.enabled, (v) => (d.enabled = v)))
+    ),
+    field(t("Кто видит события источника"), checkboxGroup(roleOptions(), d.visible_roles, (v) => (d.visible_roles = v)), t("Если ничего не выбрано — все, у кого есть право на категорию")),
+    existing && existing.ingest_path
+      ? h("fieldset", null, h("legend", null, t("Адрес для отправки событий")), copyField(existing.ingest_url || location.origin + existing.ingest_path), h("div", { style: "margin-top:10px" }, ingestHelp(type, existing.ingest_url || location.origin + existing.ingest_path)))
+      : conn.passive
+      ? h("div", { class: "notice" }, icon("info"), h("div", null, t("После сохранения здесь появится адрес webhook с секретным токеном.")))
+      : null,
+    fieldsets,
+    result
+  );
+  const foot = [];
+  if (!conn.passive) {
+    foot.push(
+      h("button", {
+        class: "btn",
+        onclick: async (e) => {
+          e.target.disabled = true;
+          result.replaceChildren(loading());
+          const r = await guard(() => api("/api/sources/test", { body: ctx() }));
+          e.target.disabled = false;
+          if (!r) return result.replaceChildren();
+          result.replaceChildren(h("div", { class: "notice " + (r.ok ? "" : "critical") }, icon(r.ok ? "check" : "alert"), h("div", null, r.message)));
+        },
+      }, t("Проверить подключение"))
+    );
+  }
+  foot.push(h("button", { class: "btn", onclick: () => m.close() }, t("Отмена")));
+  foot.push(
+    h("button", {
+      class: "btn primary",
+      onclick: async () => {
+        if (!d.name.trim()) return toast(t("Укажите название"), "error");
+        const payload = Object.assign({ type }, d);
+        const r = await guard(() => api(existing ? `/api/sources/${existing.id}` : "/api/sources", { method: existing ? "PUT" : "POST", body: payload }), t("Источник сохранён"));
+        if (!r) return;
+        m.close();
+        S.meta = await api("/api/meta");
+        if (!existing && r.ingest_path) sourceEditor(type, r);
+        renderPage();
+      },
+    }, t("Сохранить"))
+  );
+  const m = modal({ title: existing ? existing.name : conn.title, subtitle: existing ? conn.title : t("Новый источник"), body, foot, wide: true });
+}
+
+async function pageRules(root) {
+  append(root, pageHead(t("Правила маршрутизации"), t("Кому и какие события отправлять. Правила применяются по порядку"), h("button", { class: "btn primary", onclick: () => ruleForm(null) }, icon("plus"), t("Новое правило"))));
+  const data = await api("/api/rules");
+  const roleTitle = (n) => (S.meta.roles.find((r) => r.name === n) || { title: n }).title;
+  const userTitle = (id) => { const u = (S.meta.users || []).find((x) => x.id === id); return u ? u.full_name || u.username : "#" + id; };
+  const sourceTitle = (id) => { const s = (S.meta.sources || []).find((x) => x.id === id); return s ? s.name : "#" + id; };
+  if (!data.items.length) {
+    root.append(panel(null, null, emptyState("sliders", t("Правил нет — события никому не отправляются"))));
+    return;
+  }
+  root.append(
+    panel(
+      null,
+      null,
+      h(
+        "div",
+        { class: "table-wrap" },
+        h(
+          "table",
+          { class: "table" },
+          h("thead", null, h("tr", null, h("th", null, "№"), h("th", null, t("Правило")), h("th", null, t("Получатели")), h("th", null, t("Эскалация")), h("th", null, t("Вкл.")), h("th", { class: "right" }, ""))),
+          h(
+            "tbody",
+            null,
+            data.items.map((r) => {
+              const cond = [r.categories.length ? r.categories.map((c) => CAT[c]).join(", ") : t("Все категории"), t("от «") + SEV[r.min_severity] + "»"];
+              if (r.source_ids.length) cond.push(t("источники: ") + r.source_ids.map(sourceTitle).join(", "));
+              if (r.event_types.length) cond.push(t("типы: ") + r.event_types.join(", "));
+              const targets = [...r.target_roles.map(roleTitle), ...r.target_users.map(userTitle)];
+              const esc = r.escalate_after_min && (r.escalate_roles.length || r.escalate_users.length) ? t("через {n} мин → {targets}", { n: r.escalate_after_min, targets: [...r.escalate_roles.map(roleTitle), ...r.escalate_users.map(userTitle)].join(", ") }) : "—";
+              return h(
+                "tr",
+                null,
+                h("td", { class: "muted" }, r.priority),
+                h("td", { class: "title-cell" }, r.name, h("div", { class: "sub" }, cond.join(" · ")), r.stop ? h("span", { class: "badge outline small" }, t("Остановить дальнейшие правила")) : null),
+                h("td", { class: "small" }, targets.join(", ") || "—"),
+                h("td", { class: "small muted" }, esc),
+                h("td", null, h("input", { type: "checkbox", checked: r.enabled, onchange: async (e) => { await guard(() => api(`/api/rules/${r.id}`, { method: "PUT", body: Object.assign({}, r, { enabled: e.target.checked }) }), e.target.checked ? t("Правило включено") : t("Правило выключено")); } })),
+                h(
+                  "td",
+                  { class: "right nowrap" },
+                  h("button", { class: "btn sm ghost", onclick: () => ruleForm(r) }, icon("edit")),
+                  h("button", { class: "btn sm ghost danger", onclick: () => confirmDialog(t("Удалить правило «{name}»?", { name: r.name }), async () => { await guard(() => api(`/api/rules/${r.id}`, { method: "DELETE" }), t("Правило удалено")); renderPage(); }) }, icon("trash"))
+                )
+              );
+            })
+          )
+        )
+      ),
+      true
+    )
+  );
+}
+
+function ruleForm(rule) {
+  const d = rule
+    ? JSON.parse(JSON.stringify(rule))
+    : { name: "", enabled: true, priority: 100, categories: [], source_ids: [], event_types: [], min_severity: "warning", target_roles: [], target_users: [], escalate_after_min: 0, escalate_roles: [], escalate_users: [], stop: false };
+  const body = h(
+    "div",
+    null,
+    h("div", { class: "grid-2" }, field(t("Название"), input({ value: d.name, oninput: (e) => (d.name = e.target.value) })), field(t("Порядок"), input({ type: "number", value: d.priority, oninput: (e) => (d.priority = Number(e.target.value)) }), t("Меньше — раньше"))),
+    h(
+      "fieldset",
+      null,
+      h("legend", null, t("Условия")),
+      field(t("Категории"), checkboxGroup((S.meta.categories || []).map((c) => [c.id, c.title]), d.categories, (v) => (d.categories = v)), t("Пусто — любые")),
+      field(t("Минимальная важность"), select([["info", t("Информация")], ["warning", t("Предупреждение")], ["critical", t("Критично")]], d.min_severity, { onchange: (e) => (d.min_severity = e.target.value) })),
+      (S.meta.sources || []).length ? field(t("Источники"), checkboxGroup(S.meta.sources.map((s) => [s.id, s.name]), d.source_ids, (v) => (d.source_ids = v.map(Number))), t("Пусто — любые")) : null,
+      field(t("Типы событий"), input({ value: d.event_types.join(", "), placeholder: "source.down, backup.*, check.*", oninput: (e) => (d.event_types = e.target.value.split(",").map((x) => x.trim()).filter(Boolean)) }), t("Через запятую, можно использовать * . Пусто — любые"))
+    ),
+    h(
+      "fieldset",
+      null,
+      h("legend", null, t("Получатели")),
+      field(t("Роли"), checkboxGroup(roleOptions(), d.target_roles, (v) => (d.target_roles = v))),
+      field(t("Пользователи"), checkboxGroup(userOptions(), d.target_users, (v) => (d.target_users = v.map(Number))))
+    ),
+    h(
+      "fieldset",
+      null,
+      h("legend", null, t("Эскалация критичных событий")),
+      field(t("Если не подтверждено за, минут"), input({ type: "number", min: 0, value: d.escalate_after_min, oninput: (e) => (d.escalate_after_min = Number(e.target.value)) }), t("0 — без эскалации")),
+      field(t("Отправить ролям"), checkboxGroup(roleOptions(), d.escalate_roles, (v) => (d.escalate_roles = v))),
+      field(t("Отправить пользователям"), checkboxGroup(userOptions(), d.escalate_users, (v) => (d.escalate_users = v.map(Number))))
+    ),
+    h("div", { class: "row" }, checkbox(t("Правило включено"), d.enabled, (v) => (d.enabled = v)), checkbox(t("Не проверять следующие правила, если это сработало"), d.stop, (v) => (d.stop = v)))
+  );
+  const m = modal({
+    title: rule ? t("Правило") : t("Новое правило"),
+    body,
+    wide: true,
+    foot: [
+      h("button", { class: "btn", onclick: () => m.close() }, t("Отмена")),
+      h("button", {
+        class: "btn primary",
+        onclick: async () => {
+          const r = await guard(() => api(rule ? `/api/rules/${rule.id}` : "/api/rules", { method: rule ? "PUT" : "POST", body: d }), t("Правило сохранено"));
+          if (r) {
+            m.close();
+            renderPage();
+          }
+        },
+      }, t("Сохранить")),
+    ],
+  });
+}
+
+async function pageUsers(root) {
+  append(root, pageHead(t("Пользователи и роли"), t("Подтверждение заявок, права доступа и роли")));
+  const [users, roles] = await Promise.all([api("/api/users"), api("/api/roles")]);
+  const roleOpts = roles.items.map((r) => [r.id, r.title]);
+  const pending = users.items.filter((u) => u.status === "pending");
+  if (pending.length) {
+    root.append(
+      panel(
+        t("Заявки на регистрацию ({n})", { n: pending.length }),
+        null,
+        h(
+          "div",
+          { class: "stack" },
+          pending.map((u) => {
+            const roleSel = select(roleOpts, (roles.items.find((r) => r.name === "user") || roles.items[0]).id);
+            return h(
+              "div",
+              { class: "between", style: "padding:6px 0;border-bottom:1px solid var(--border)" },
+              h("div", null, h("strong", null, u.full_name || u.username), h("div", { class: "muted small" }, u.username, u.telegram_username ? " · @" + u.telegram_username : "", " · ", ago(u.created_at))),
+              h(
+                "div",
+                { class: "row" },
+                roleSel,
+                h("button", { class: "btn primary", onclick: async () => { const r = await guard(() => api(`/api/users/${u.id}/approve`, { body: { role_id: Number(roleSel.value) } }), t("Пользователь подтверждён")); if (r) { S.meta = await api("/api/meta"); renderPage(); } } }, icon("check"), t("Подтвердить")),
+                h("button", { class: "btn danger", onclick: () => confirmDialog(t("Отклонить заявку {name}?", { name: u.username }), async () => { await guard(() => api(`/api/users/${u.id}/reject`, { body: {} }), t("Заявка отклонена")); renderPage(); }, t("Отклонить")) }, t("Отклонить"))
+              )
+            );
+          })
+        )
+      )
+    );
+  }
+  const others = users.items.filter((u) => u.status !== "pending");
+  root.append(
+    panel(
+      t("Пользователи"),
+      null,
+      h(
+        "div",
+        { class: "table-wrap" },
+        h(
+          "table",
+          { class: "table" },
+          h("thead", null, h("tr", null, h("th", null, t("Пользователь")), h("th", null, t("Роль")), h("th", null, t("Статус")), h("th", null, "Telegram"), h("th", null, t("Вход")), h("th", { class: "right" }, ""))),
+          h(
+            "tbody",
+            null,
+            others.map((u) =>
+              h(
+                "tr",
+                null,
+                h("td", { class: "title-cell" }, u.full_name || u.username, h("div", { class: "sub" }, u.username, u.is_superuser ? t(" · главный администратор") : "")),
+                h("td", null, select([["", t("— нет —")], ...roleOpts], u.role ? u.role.id : "", { disabled: u.is_superuser, onchange: async (e) => { await guard(() => api(`/api/users/${u.id}`, { method: "PUT", body: { role_id: e.target.value ? Number(e.target.value) : null } }), t("Роль изменена")); } })),
+                h("td", null, select([["active", t("Активен")], ["blocked", t("Заблокирован")]], u.status, { disabled: u.is_superuser, onchange: async (e) => { await guard(() => api(`/api/users/${u.id}`, { method: "PUT", body: { status: e.target.value } }), t("Статус изменён")); } })),
+                h("td", { class: "small" }, u.telegram_linked || u.personal_bot_linked ? h("span", { class: "badge ok" }, "✓ " + (u.telegram_username ? "@" + u.telegram_username : t("привязан"))) : h("span", { class: "muted" }, u.telegram_username ? "@" + u.telegram_username + t(" (не привязан)") : "—")),
+                h("td", { class: "muted small nowrap" }, u.last_login_at ? ago(u.last_login_at) : "—"),
+                h(
+                  "td",
+                  { class: "right nowrap" },
+                  S.meta.chat_enabled && u.status === "active" && u.id !== S.me.id ? h("button", { class: "btn sm ghost", title: t("Написать в чат"), onclick: () => openDirect(u.id) }, icon("message")) : null,
+                  h("button", { class: "btn sm ghost", title: t("Сбросить пароль"), onclick: () => resetPassword(u) }, t("Пароль")),
+                  u.is_superuser || u.id === S.me.id ? null : h("button", { class: "btn sm ghost danger", onclick: () => confirmDialog(t("Удалить пользователя {name}?", { name: u.username }), async () => { await guard(() => api(`/api/users/${u.id}`, { method: "DELETE" }), t("Пользователь удалён")); renderPage(); }) }, icon("trash"))
+                )
+              )
+            )
+          )
+        )
+      ),
+      true
+    )
+  );
+  const permTitle = Object.fromEntries((S.meta.permissions || []).map((p) => [p.id, p.title]));
+  root.append(
+    panel(
+      t("Роли"),
+      h("button", { class: "btn sm", onclick: () => roleForm(null) }, icon("plus"), t("Новая роль")),
+      h(
+        "div",
+        { class: "table-wrap" },
+        h(
+          "table",
+          { class: "table" },
+          h("thead", null, h("tr", null, h("th", null, t("Роль")), h("th", null, t("Права")), h("th", { class: "right" }, ""))),
+          h(
+            "tbody",
+            null,
+            roles.items.map((r) =>
+              h(
+                "tr",
+                null,
+                h("td", { class: "title-cell" }, r.title, h("div", { class: "sub mono" }, r.name)),
+                h("td", { class: "small muted" }, r.permissions.map((p) => permTitle[p] || p).join(" · ") || "—"),
+                h("td", { class: "right nowrap" }, r.name === "admin" ? h("span", { class: "faint small" }, t("все права")) : h("button", { class: "btn sm ghost", onclick: () => roleForm(r) }, icon("edit")), r.builtin ? null : h("button", { class: "btn sm ghost danger", onclick: () => confirmDialog(t("Удалить роль «{name}»?", { name: r.title }), async () => { await guard(() => api(`/api/roles/${r.id}`, { method: "DELETE" }), t("Роль удалена")); renderPage(); }) }, icon("trash")))
+              )
+            )
+          )
+        )
+      ),
+      true
+    )
+  );
+}
+
+function resetPassword(u) {
+  const p = input({ type: "password", autocomplete: "new-password" });
+  const m = modal({
+    title: t("Новый пароль для ") + u.username,
+    body: field(t("Пароль (минимум 6 символов)"), p),
+    foot: [
+      h("button", { class: "btn", onclick: () => m.close() }, t("Отмена")),
+      h("button", { class: "btn primary", onclick: async () => { const r = await guard(() => api(`/api/users/${u.id}/password`, { body: { password: p.value } }), t("Пароль изменён")); if (r) m.close(); } }, t("Сохранить")),
+    ],
+  });
+}
+
+function roleForm(role) {
+  const d = role ? { name: role.name, title: role.title, permissions: [...role.permissions] } : { name: "", title: "", permissions: [] };
+  const body = h(
+    "div",
+    null,
+    h("div", { class: "grid-2" }, field(t("Название"), input({ value: d.title, oninput: (e) => (d.title = e.target.value) })), field(t("Код (латиница)"), input({ value: d.name, disabled: role && role.builtin, placeholder: "support", oninput: (e) => (d.name = e.target.value) }))),
+    field(t("Права"), h("div", { class: "stack", style: "gap:2px" }, (S.meta.permissions || []).map((p) => checkbox(p.title, d.permissions.includes(p.id), (on) => { d.permissions = on ? [...d.permissions, p.id] : d.permissions.filter((x) => x !== p.id); }))))
+  );
+  const m = modal({
+    title: role ? t("Роль: ") + role.title : t("Новая роль"),
+    body,
+    foot: [
+      h("button", { class: "btn", onclick: () => m.close() }, t("Отмена")),
+      h("button", { class: "btn primary", onclick: async () => { const r = await guard(() => api(role ? `/api/roles/${role.id}` : "/api/roles", { method: role ? "PUT" : "POST", body: d }), t("Роль сохранена")); if (r) { m.close(); S.meta = await api("/api/meta"); renderPage(); } } }, t("Сохранить")),
+    ],
+  });
+}
+
+async function pageSettings(root) {
+  const data = await api("/api/settings");
+  const v = Object.assign({}, data.values);
+  const locked = new Set(v.env_locked || []);
+  const txt = (key, label, help, placeholder, type = "text") =>
+    field(label, input({ type, value: v[key] ?? "", placeholder: placeholder || "", disabled: locked.has(key), autocomplete: type === "password" ? "new-password" : "off", oninput: (e) => (v[key] = type === "number" ? Number(e.target.value) : e.target.value) }), locked.has(key) ? t("Задано в .env") : help);
+  const bot = data.bot;
+  const botState =
+    bot.status === "running"
+      ? h("span", { class: "badge ok" }, t("Работает: @") + bot.username)
+      : bot.status === "error"
+      ? h("span", { class: "badge critical" }, t("Ошибка: ") + bot.error)
+      : h("span", { class: "badge" }, t("Не настроен"));
+  const save = async () => {
+    const payload = Object.assign({}, v);
+    delete payload.env_locked;
+    for (const key of Object.keys(payload)) if (key.startsWith("template_")) delete payload[key];
+    const r = await guard(() => api("/api/settings", { method: "PUT", body: payload }), t("Настройки сохранены"));
+    if (r) {
+      const chatBefore = S.meta.chat_enabled;
+      S.meta = await api("/api/meta");
+      if (chatBefore !== S.meta.chat_enabled) render();
+      else renderPage();
+    }
+  };
+  append(root, pageHead(t("Настройки"), t("Telegram, резервное копирование, хранилища"), h("button", { class: "btn primary", onclick: save }, t("Сохранить"))));
+  root.append(
+    panel(
+      "Telegram",
+      h("div", { class: "row" }, botState, h("button", { class: "btn sm", onclick: async () => { await guard(() => api("/api/settings/telegram/restart", { body: {} }), t("Бот перезапущен")); renderPage(); } }, icon("refresh"), t("Перезапустить"))),
+      h(
+        "div",
+        null,
+        h("div", { class: "grid-2" }, txt("telegram_token", t("Токен бота"), t("Получите у @BotFather"), "123456:ABC…", "password"), txt("telegram_api_url", t("Локальный Bot API сервер"), t("Для файлов до 2 ГБ. Пусто — api.telegram.org"), "http://127.0.0.1:8081")),
+        h("div", { class: "grid-2" }, txt("public_url", t("Внешний адрес OpsWatch"), t("Для ссылок в уведомлениях и webhook-адресов"), data.base_url), field(t("Лимит части файла, МБ"), input({ type: "number", value: v.telegram_part_mb, oninput: (e) => (v.telegram_part_mb = Number(e.target.value)) }), t("Не больше 49 для api.telegram.org"))),
+        h("div", { class: "row" }, checkbox(t("Принимать /bug от непривязанных пользователей Telegram"), v.bot_public_bugs, (x) => (v.bot_public_bugs = x)))
+      )
+    )
+  );
+  root.append(
+    panel(
+      t("Уведомления и доступ"),
+      null,
+      h(
+        "div",
+        null,
+        h("div", { class: "grid-2" }, field(t("Группировать одинаковые события, мин"), input({ type: "number", min: 0, value: v.group_window_min, oninput: (e) => (v.group_window_min = Number(e.target.value)) }), t("Повторное уведомление не чаще этого интервала")), field(t("Хранить историю, дней"), input({ type: "number", min: 1, value: v.event_retention_days, oninput: (e) => (v.event_retention_days = Number(e.target.value)) }))),
+        h("div", { class: "grid-2" }, field(t("Язык системных событий"), select(Object.entries(LANGS), v.language || "ru", { onchange: (e) => (v.language = e.target.value) }), t("На этом языке создаются тексты событий от источников, бэкапов и системы")), field(t("Хранить историю графиков, дней"), input({ type: "number", min: 1, value: v.metric_retention_days, oninput: (e) => (v.metric_retention_days = Number(e.target.value)) }))),
+        checkbox(t("Разрешить регистрацию новых пользователей"), v.registration_enabled, (x) => (v.registration_enabled = x)),
+        checkbox(t("Включить чат между сотрудниками"), v.chat_enabled, (x) => (v.chat_enabled = x))
+      )
+    )
+  );
+  root.append(
+    panel(
+      t("Резервное копирование"),
+      null,
+      h(
+        "div",
+        null,
+        h("div", { class: "grid-2" }, txt("backup_dir", t("Каталог бэкапов"), t("Пусто — ") + data.backup_dir, data.backup_dir), txt("onec_platform_path", t("Каталог платформы 1С"), t("Для проверки целостности"), "C:\\Program Files\\1cv8\\8.3.24.1691\\bin")),
+        h("div", { class: "grid-2" }, txt("mysqldump_path", t("Путь к mysqldump"), "", "mysqldump"), txt("pg_dump_path", t("Путь к pg_dump"), "", "pg_dump"))
+      )
+    )
+  );
+  root.append(
+    panel(
+      t("S3-хранилище для больших бэкапов"),
+      null,
+      h(
+        "div",
+        null,
+        h("div", { class: "grid-3" }, txt("s3_endpoint", "Endpoint", t("Пусто — AWS"), "https://storage.yandexcloud.net"), txt("s3_region", t("Регион"), "", "ru-central1"), txt("s3_bucket", "Bucket", "")),
+        h("div", { class: "grid-3" }, txt("s3_access_key", "Access key", ""), txt("s3_secret_key", "Secret key", "", "", "password"), txt("s3_prefix", t("Префикс"), "", "opswatch/")),
+        field(t("Срок действия ссылки, дней"), input({ type: "number", min: 1, max: 7, value: v.s3_link_days, oninput: (e) => (v.s3_link_days = Number(e.target.value)) }))
+      )
+    )
+  );
+  root.append(await templatesPanel());
+  root.append(
+    panel(
+      t("Хранилище"),
+      null,
+      h(
+        "div",
+        { class: "kv" },
+        h("div", { class: "k" }, t("База данных")),
+        h("div", null, h("code", null, data.database)),
+        h("div", { class: "k" }, t("Каталог данных")),
+        h("div", null, h("code", null, data.data_dir))
+      ),
+      false
+    )
+  );
+  if (data.database_dialect === "sqlite") {
+    root.append(h("div", { class: "notice", style: "margin-top:12px" }, icon("database"), h("div", null, t("Для большой нагрузки можно перенести данные в PostgreSQL: "), h("code", null, "OpsWatchServer.exe migrate-db postgresql://user:pass@host/opswatch --write-env"), t(", затем перезапустить программу."))));
+  }
+}
+
+const TEMPLATE_KIND_TITLES = { event: t("Новое событие"), repeat: t("Повтор"), escalation: t("Эскалация"), resolved: t("Решено") };
+
+function telegramHtml(text) {
+  const doc = new DOMParser().parseFromString(`<div>${text}</div>`, "text/html");
+  const allowed = { b: "b", strong: "b", i: "i", em: "i", u: "u", ins: "u", s: "s", strike: "s", del: "s", code: "code", pre: "pre", a: "a", blockquote: "blockquote", "tg-spoiler": "span" };
+  const walk = (node) => {
+    const out = [];
+    node.childNodes.forEach((child) => {
+      if (child.nodeType === Node.TEXT_NODE) {
+        out.push(document.createTextNode(child.textContent));
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const tag = allowed[child.tagName.toLowerCase()];
+        const kids = walk(child);
+        if (tag) {
+          const el = document.createElement(tag);
+          if (tag === "a") {
+            const href = child.getAttribute("href") || "";
+            if (/^https?:/i.test(href)) {
+              el.href = href;
+              el.target = "_blank";
+              el.rel = "noopener";
+            }
+          }
+          el.append(...kids);
+          out.push(el);
+        } else {
+          out.push(...kids);
+        }
+      }
+    });
+    return out;
+  };
+  const box = h("div", { class: "tg-text" });
+  box.append(...walk(doc.body.firstChild || doc.body));
+  return box;
+}
+
+async function templatesPanel() {
+  const data = await api("/api/settings/templates");
+  const st = { lang: LANG, kind: "event" };
+  const langChips = h("div", { class: "chips" });
+  const kindChips = h("div", { class: "chips" });
+  const textarea = h("textarea", { class: "code", style: "min-height:190px" });
+  const preview = h("div", { class: "tg-bubble" });
+  const problems = h("div");
+  const badge = h("span");
+  const placeholders = h(
+    "div",
+    { class: "chips" },
+    data.placeholders.map((p) =>
+      h("button", {
+        class: "chip mono",
+        title: p.title,
+        type: "button",
+        onclick: () => {
+          const start = textarea.selectionStart;
+          const end = textarea.selectionEnd;
+          textarea.setRangeText("{" + p.name + "}", start, end, "end");
+          textarea.focus();
+          schedule();
+        },
+      }, "{" + p.name + "}")
+    )
+  );
+  let timer;
+  const schedule = () => {
+    clearTimeout(timer);
+    timer = setTimeout(refresh, 300);
+  };
+  textarea.addEventListener("input", schedule);
+  async function refresh() {
+    const r = await api("/api/settings/templates/preview", { body: { lang: st.lang, kind: st.kind, value: textarea.value } }).catch((e) => ({ text: "", problems: [e.message] }));
+    const buttons = st.kind === "resolved" ? null : h("div", { class: "tg-buttons" }, [t("👌 Принял"), t("✅ Решено"), t("ℹ️ Подробнее")].map((b) => h("span", null, b)));
+    preview.replaceChildren(telegramHtml(r.text), buttons || "");
+    problems.replaceChildren(...(r.problems || []).map((p) => h("div", { class: "notice critical", style: "margin:8px 0 0" }, icon("alert"), h("div", null, p))));
+  }
+  function draw() {
+    langChips.replaceChildren(...data.languages.map((l) => h("button", { class: "chip" + (st.lang === l ? " active" : ""), onclick: () => { st.lang = l; draw(); } }, l === "ru" ? t("Русский") : "English")));
+    kindChips.replaceChildren(...data.kinds.map((k) => h("button", { class: "chip" + (st.kind === k ? " active" : ""), onclick: () => { st.kind = k; draw(); } }, TEMPLATE_KIND_TITLES[k] || k)));
+    const item = data.templates[st.lang][st.kind];
+    textarea.value = item.value || item.default;
+    badge.replaceChildren(item.custom ? h("span", { class: "badge accent" }, t("Свой шаблон")) : h("span", { class: "badge" }, t("Стандартный")));
+    refresh();
+  }
+  const save = async (value) => {
+    const r = await guard(() => api("/api/settings/templates", { method: "PUT", body: { lang: st.lang, kind: st.kind, value } }), t("Шаблон сохранён"));
+    if (r) {
+      data.templates = r.templates;
+      draw();
+    }
+  };
+  draw();
+  return panel(
+    t("Шаблоны уведомлений"),
+    badge,
+    h(
+      "div",
+      { class: "stack" },
+      h("p", { class: "muted small", style: "margin:0" }, t("Текст сообщений в Telegram. Можно использовать теги <b>, <i>, <code>, <a href> и подстановки. Строка, где все подстановки пустые, скрывается.")),
+      h("div", { class: "row" }, langChips, h("span", { class: "tab-sep", style: "height:22px" }), kindChips),
+      h(
+        "div",
+        { class: "grid-2", style: "align-items:start" },
+        h("div", { class: "stack", style: "gap:8px" }, textarea, placeholders),
+        h("div", null, h("div", { class: "label", style: "margin-bottom:6px" }, t("Предпросмотр")), preview, problems)
+      ),
+      h(
+        "div",
+        { class: "row" },
+        h("button", { class: "btn primary", onclick: () => save(textarea.value) }, t("Сохранить шаблон")),
+        h("button", { class: "btn", onclick: () => save("") }, t("Вернуть стандартный")),
+        h("button", { class: "btn", onclick: () => guard(() => api("/api/settings/templates/test", { body: { lang: st.lang, kind: st.kind, value: textarea.value } }), t("Тестовое сообщение отправлено")) }, icon("send"), t("Отправить себе"))
+      )
+    )
+  );
+}
+
+async function pageProfile(root) {
+  const me = await api("/api/auth/me");
+  S.me = me;
+  append(root, pageHead(t("Профиль"), (me.role ? me.role.title : t("Роль не назначена")) + " · " + me.username));
+  if (me.status !== "active") {
+    root.append(h("div", { class: "notice warning" }, icon("alert"), h("div", null, h("strong", null, t("Учётная запись ожидает подтверждения администратором. ")), t("Пока можно заполнить профиль и привязать Telegram — уведомления начнут приходить после выдачи прав."))));
+  }
+  const p = { full_name: me.full_name, email: me.email, telegram_username: me.telegram_username, notify_telegram: me.notify_telegram, notify_desktop: me.notify_desktop, quiet_start: me.quiet_start, quiet_end: me.quiet_end, chat_telegram: me.chat_telegram };
+  const saveProfile = async (msg = t("Сохранено")) => {
+    const r = await guard(() => api("/api/profile", { method: "PUT", body: p }), msg);
+    if (r) {
+      S.me = r;
+      syncBridge();
+    }
+    return r;
+  };
+  const left = h("div", { class: "stack" });
+  const right = h("div", { class: "stack" });
+  root.append(h("div", { class: "grid-2", style: "align-items:start" }, left, right));
+
+  left.append(
+    panel(
+      t("Учётная запись"),
+      null,
+      h(
+        "div",
+        null,
+        field(t("Имя и фамилия"), input({ value: p.full_name, oninput: (e) => (p.full_name = e.target.value) })),
+        field("Email", input({ type: "email", value: p.email, oninput: (e) => (p.email = e.target.value) })),
+        field("Telegram", input({ value: p.telegram_username, placeholder: "@username", oninput: (e) => (p.telegram_username = e.target.value) })),
+        field(t("Язык интерфейса и уведомлений"), select(Object.entries(LANGS), LANG, { onchange: (e) => setLanguage(e.target.value) })),
+        h("button", { class: "btn primary", onclick: () => saveProfile() }, t("Сохранить"))
+      )
+    )
+  );
+
+  const tgBox = h("div");
+  function drawTelegram(user) {
+    const linked = user.telegram_linked;
+    const items = [];
+    if (linked) {
+      items.push(h("div", { class: "notice" }, icon("check"), h("div", null, t("Telegram привязан"), user.telegram_username ? " (@" + user.telegram_username + ")" : "", t(". Уведомления приходят в личные сообщения бота"), S.meta.bot_username ? " @" + S.meta.bot_username : "", ".")));
+      items.push(
+        h(
+          "div",
+          { class: "row" },
+          h("button", { class: "btn", onclick: () => guard(() => api("/api/profile/telegram/test", { body: {} }), t("Тестовое сообщение отправлено")) }, icon("send"), t("Тестовое сообщение")),
+          h("button", { class: "btn danger", onclick: async () => { const r = await guard(() => api("/api/profile/telegram", { method: "DELETE" }), t("Telegram отвязан")); if (r) drawTelegram(r); } }, t("Отвязать"))
+        )
+      );
+    } else {
+      items.push(h("p", { class: "muted" }, t("Привяжите Telegram, чтобы получать уведомления, нажимать «Принял / Решено» и отправлять баг-репорты боту.")));
+      const linkArea = h("div");
+      items.push(
+        h("button", {
+          class: "btn primary",
+          onclick: async () => {
+            const r = await guard(() => api("/api/profile/telegram/link", { body: {} }));
+            if (!r) return;
+            linkArea.replaceChildren(
+              h(
+                "div",
+                { class: "stack", style: "margin-top:12px" },
+                r.bot_username
+                  ? h("a", { class: "btn", href: r.deep_link, target: "_blank" }, icon("send"), t("Открыть @") + r.bot_username + t(" и нажать «Старт»"))
+                  : h("div", { class: "notice warning" }, icon("alert"), h("div", null, t("Системный бот не настроен администратором. Используйте собственного бота ниже."))),
+                h("div", null, h("div", { class: "muted small" }, t("или отправьте боту команду:")), h("span", { class: "code-badge" }, "/start " + r.code)),
+                h("div", { class: "faint small" }, t("Код действует 15 минут. Страница обновится автоматически после привязки."))
+              )
+            );
+            let tries = 0;
+            const timer = setInterval(async () => {
+              tries++;
+              if (tries > 60 || S.route !== "profile") return clearInterval(timer);
+              const fresh = await api("/api/auth/me").catch(() => null);
+              if (fresh && fresh.telegram_linked) {
+                clearInterval(timer);
+                S.me = fresh;
+                toast(t("Telegram привязан"));
+                drawTelegram(fresh);
+              }
+            }, 3000);
+          },
+        }, icon("link"), t("Привязать Telegram")),
+        linkArea
+      );
+    }
+    const tokenInput = input({ type: "password", placeholder: "123456789:AA…", autocomplete: "off" });
+    const personal = h(
+      "details",
+      { style: "margin-top:16px", open: !!user.personal_bot },
+      h("summary", { class: "muted", style: "cursor:pointer" }, t("Свой бот для уведомлений")),
+      h(
+        "div",
+        { style: "margin-top:10px" },
+        user.personal_bot
+          ? h(
+              "div",
+              { class: "stack" },
+              h("div", null, t("Бот "), h("a", { href: "https://t.me/" + user.personal_bot, target: "_blank" }, "@" + user.personal_bot), user.personal_bot_linked ? h("span", { class: "badge ok", style: "margin-left:6px" }, t("привязан")) : h("span", { class: "badge warning", style: "margin-left:6px" }, t("ожидает /start"))),
+              user.personal_bot_linked ? null : h("div", { class: "muted small" }, t("Откройте бота в Telegram, нажмите «Старт», затем «Проверить».")),
+              h(
+                "div",
+                { class: "row" },
+                user.personal_bot_linked ? null : h("button", { class: "btn primary", onclick: async () => { const r = await guard(() => api("/api/profile/personal-bot/detect", { body: {} }), t("Бот привязан")); if (r) drawTelegram(r); } }, t("Проверить")),
+                h("button", { class: "btn danger", onclick: async () => { const r = await guard(() => api("/api/profile/personal-bot", { method: "DELETE" }), t("Бот отключён")); if (r) drawTelegram(r); } }, t("Отключить"))
+              )
+            )
+          : h(
+              "div",
+              null,
+              field(t("Токен бота от @BotFather"), tokenInput, t("Уведомления будут приходить через вашего бота вместо системного")),
+              h("button", { class: "btn", onclick: async () => { const r = await guard(() => api("/api/profile/personal-bot", { method: "PUT", body: { token: tokenInput.value.trim() } })); if (r) { toast(t("Бот @") + r.username + t(" сохранён. Откройте его и нажмите «Старт».")); const fresh = await api("/api/auth/me"); drawTelegram(fresh); } } }, t("Сохранить бота"))
+            )
+      )
+    );
+    tgBox.replaceChildren(...items, personal);
+  }
+  drawTelegram(me);
+  left.append(panel("Telegram", null, tgBox));
+
+  const pass = { current: input({ type: "password", autocomplete: "current-password" }), next: input({ type: "password", autocomplete: "new-password" }), again: input({ type: "password", autocomplete: "new-password" }) };
+  left.append(
+    panel(
+      t("Пароль"),
+      null,
+      h(
+        "div",
+        null,
+        field(t("Текущий пароль"), pass.current),
+        h("div", { class: "grid-2", style: "gap:10px" }, field(t("Новый пароль"), pass.next), field(t("Ещё раз"), pass.again)),
+        h("button", {
+          class: "btn",
+          onclick: async () => {
+            if (pass.next.value !== pass.again.value) return toast(t("Пароли не совпадают"), "error");
+            const r = await guard(() => api("/api/profile/password", { body: { current: pass.current.value, new: pass.next.value } }), t("Пароль изменён"));
+            if (r) pass.current.value = pass.next.value = pass.again.value = "";
+          },
+        }, t("Сменить пароль"))
+      )
+    )
+  );
+
+  const inDesktop = !!bridge();
+  const desktopToggle = h("input", {
+    type: "checkbox",
+    checked: p.notify_desktop,
+    onchange: async (e) => {
+      p.notify_desktop = e.target.checked;
+      if (p.notify_desktop && !inDesktop && "Notification" in window && Notification.permission !== "granted") {
+        const perm = await Notification.requestPermission();
+        if (perm !== "granted") toast(t("Браузер запретил уведомления — разрешите их в настройках сайта"), "error");
+      }
+      await saveProfile(p.notify_desktop ? t("Уведомления на ПК включены") : t("Уведомления на ПК выключены"));
+      if (p.notify_desktop && !inDesktop && "Notification" in window && Notification.permission === "granted") {
+        new Notification("OpsWatch", { body: t("Уведомления на этом компьютере включены"), icon: "/favicon.svg" });
+      }
+    },
+  });
+  right.append(
+    panel(
+      t("Уведомления"),
+      null,
+      h(
+        "div",
+        null,
+        h("label", { class: "switch" }, h("div", null, h("div", null, "Telegram"), h("div", { class: "muted small" }, t("Личные сообщения от бота"))), h("input", { type: "checkbox", checked: p.notify_telegram, onchange: (e) => { p.notify_telegram = e.target.checked; saveProfile(); } })),
+        S.meta.chat_enabled && me.status === "active" ? h("label", { class: "switch" }, h("div", null, h("div", null, t("Сообщения чата в Telegram")), h("div", { class: "muted small" }, t("Личные сообщения и упоминания придут в Telegram, когда вы не в сети. Ответить можно прямо в боте"))), h("input", { type: "checkbox", checked: p.chat_telegram, onchange: (e) => { p.chat_telegram = e.target.checked; saveProfile(); } })) : null,
+        h("label", { class: "switch" }, h("div", null, h("div", null, inDesktop ? t("Уведомления Windows") : t("Уведомления на этом компьютере")), h("div", { class: "muted small" }, inDesktop ? t("Программа сама покажет всплывающие уведомления, даже свёрнутая в трей") : t("Всплывающие уведомления браузера, пока открыта вкладка"))), desktopToggle),
+        h(
+          "div",
+          { style: "padding-top:12px" },
+          h("div", { class: "label", style: "margin-bottom:6px" }, t("Тихие часы (некритичные приходят без звука)")),
+          h("div", { class: "row" }, input({ type: "time", value: p.quiet_start, style: "width:130px", onchange: (e) => (p.quiet_start = e.target.value) }), "—", input({ type: "time", value: p.quiet_end, style: "width:130px", onchange: (e) => (p.quiet_end = e.target.value) }), h("button", { class: "btn", onclick: () => saveProfile(t("Тихие часы сохранены")) }, t("Сохранить")))
+        )
+      )
+    )
+  );
+
+  if (me.status === "active") {
+    const subs = await api("/api/profile/subscriptions");
+    const items = subs.items.map((x) => Object.assign({}, x));
+    const rows = items.map((it) => {
+      const minSel = select([["info", t("все")], ["warning", t("от предупреждений")], ["critical", t("только критичные")]], it.min_severity, { onchange: (e) => (it.min_severity = e.target.value) });
+      const sync = () => minSel.classList.toggle("hidden", it.mode !== "subscribed");
+      const modeSel = select([["rules", t("По правилам")], ["subscribed", t("Подписаться")], ["muted", t("Отключить")]], it.mode, { onchange: (e) => { it.mode = e.target.value; sync(); } });
+      sync();
+      return h("div", { class: "between", style: "padding:8px 0;border-bottom:1px solid var(--border)" }, h("div", { class: "row" }, icon(CAT_ICON[it.category]), CAT[it.category]), h("div", { class: "row" }, modeSel, minSel));
+    });
+    right.append(
+      panel(
+        t("Подписки на категории"),
+        null,
+        h(
+          "div",
+          null,
+          h("p", { class: "muted small" }, t("«По правилам» — как настроил администратор. «Подписаться» — получать все события категории. «Отключить» — не получать (кроме критичных по правилам). Также доступно в боте: /subscribe")),
+          rows.length ? rows : h("div", { class: "muted" }, t("Нет доступных категорий")),
+          h("button", { class: "btn primary", style: "margin-top:12px", onclick: () => guard(() => api("/api/profile/subscriptions", { method: "PUT", body: { items } }), t("Подписки сохранены")) }, t("Сохранить подписки"))
+        )
+      )
+    );
+  }
+}
+
+const CHAT = {
+  rooms: [],
+  contacts: [],
+  current: null,
+  room: null,
+  messages: [],
+  hasMore: false,
+  rev: null,
+  last: 0,
+  loop: 0,
+  controller: null,
+  select: 0,
+  editing: null,
+  filter: "",
+  readTimer: null,
+  el: null,
+};
+
+function hueOf(seed) {
+  return (Number(seed || 0) * 47) % 360;
+}
+
+function initialsOf(name) {
+  return (name || "?").trim().split(/\s+/).map((p) => p[0]).join("").slice(0, 2).toUpperCase() || "?";
+}
+
+function chatAvatar(name, seed, opts = {}) {
+  return h(
+    "span",
+    { class: "chat-avatar" + (opts.group ? " group" : "") + (opts.small ? " small" : ""), style: `--h:${hueOf(seed)}`, "aria-hidden": "true" },
+    opts.group ? icon("users") : initialsOf(name),
+    opts.online ? h("span", { class: "presence" }) : null
+  );
+}
+
+function roleTitle(name) {
+  const role = (S.meta.roles || []).find((r) => r.name === name);
+  return role ? role.title : name;
+}
+
+function chatTime(iso) {
+  const d = parseDate(iso);
+  return d ? d.toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit" }) : "";
+}
+
+function chatDay(iso) {
+  const d = parseDate(iso);
+  if (!d) return "";
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return t("Сегодня");
+  if (d.toDateString() === yesterday.toDateString()) return t("Вчера");
+  return d.toLocaleDateString(LOCALE, { day: "numeric", month: "long", year: d.getFullYear() === today.getFullYear() ? undefined : "numeric" });
+}
+
+function chatStamp(iso) {
+  const d = parseDate(iso);
+  if (!d) return "";
+  if (d.toDateString() === new Date().toDateString()) return chatTime(iso);
+  return d.toLocaleDateString(LOCALE, { day: "2-digit", month: "2-digit" });
+}
+
+function chatText(text) {
+  const out = [];
+  const re = /(https?:\/\/[^\s<>"]+)|(@[A-Za-z0-9._-]{3,32})/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[1]) out.push(h("a", { href: m[1], target: "_blank", rel: "noopener noreferrer" }, m[1]));
+    else out.push(h("span", { class: "mention" + (m[2].slice(1).toLowerCase() === S.me.username.toLowerCase() ? " me" : "") }, m[2]));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+function systemText(m) {
+  const d = m.data || {};
+  const names = (d.names || []).join(", ");
+  const roles = (d.roles || []).map(roleTitle).join(", ");
+  switch (d.code) {
+    case "created":
+      return t("{who} · создана группа «{title}»", { who: d.who, title: d.title });
+    case "added":
+      return roles ? t("{who} · добавлены участники ({roles}): {names}", { who: d.who, roles, names }) : t("{who} · добавлены участники: {names}", { who: d.who, names });
+    case "removed":
+      return t("{who} · исключены из группы: {names}", { who: d.who, names });
+    case "left":
+      return t("{who} · выход из группы", { who: d.who });
+    case "renamed":
+      return t("{who} · новое название: «{title}»", { who: d.who, title: d.title });
+    case "auto_added":
+      return t("Добавлены по роли «{role}»: {names}", { role: roleTitle(d.role), names });
+    case "auto_removed":
+      return t("Роль изменилась, исключены: {names}", { names });
+    default:
+      return "";
+  }
+}
+
+function messagePreview(room) {
+  const lm = room.last_message;
+  if (!lm) return room.kind === "group" ? t("Участников: {n}", { n: room.member_count }) : t("Нет сообщений");
+  if (lm.kind === "system") return systemText(lm);
+  if (lm.deleted) return t("Сообщение удалено");
+  const ev = (lm.data && lm.data.event) || null;
+  const body = ev ? "⚠ " + ev.title + (lm.text ? " · " + lm.text : "") : lm.text;
+  const who = lm.user_id === S.me.id ? t("Вы") : room.kind === "group" ? (lm.author || "").split(" ")[0] : "";
+  return who ? `${who}: ${body}` : body;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function chatStop() {
+  CHAT.loop++;
+  if (CHAT.controller) CHAT.controller.abort();
+  CHAT.controller = null;
+  CHAT.el = null;
+}
+
+async function pageChat(root) {
+  chatStop();
+  const raw = location.hash.replace(/^#\/?/, "").split("/");
+  const wanted = raw[1] ? Number(raw[1]) : null;
+  const [rooms, contacts] = await Promise.all([api("/api/chat/rooms"), api("/api/chat/contacts")]);
+  CHAT.rooms = rooms.items;
+  CHAT.contacts = contacts.items;
+  CHAT.rev = rooms.rev;
+  CHAT.last = rooms.last_id;
+  CHAT.current = null;
+  CHAT.room = null;
+  CHAT.messages = [];
+  CHAT.editing = null;
+  S.chatUnread = rooms.unread;
+  updateBadges();
+  const search = input({ type: "search", class: "chat-search", placeholder: t("Поиск чатов и сотрудников"), value: CHAT.filter, oninput: (e) => { CHAT.filter = e.target.value; renderRoomList(); } });
+  const list = h("div", { class: "chat-list" });
+  const main = h("section", { class: "chat-main" });
+  const side = h(
+    "aside",
+    { class: "chat-side" },
+    h(
+      "div",
+      { class: "chat-side-head" },
+      h("h2", null, t("Чат")),
+      h(
+        "div",
+        { class: "row", style: "gap:4px" },
+        h("button", { class: "icon-btn", title: t("Написать сотруднику"), onclick: newDirectDialog }, icon("edit")),
+        h("button", { class: "icon-btn", title: t("Новая группа"), onclick: () => groupDialog(null) }, icon("users"))
+      )
+    ),
+    h("div", { class: "chat-search-wrap" }, search),
+    list
+  );
+  const box = h("div", { class: "chat" }, side, main);
+  CHAT.el = { box, list, main, search };
+  root.append(box);
+  renderRoomList();
+  setTimeout(() => {
+    if (!CHAT.el) return;
+    chatSelect(wanted && CHAT.rooms.some((r) => r.id === wanted) ? wanted : null);
+    chatLoop();
+  }, 0);
+}
+
+function renderRoomList() {
+  if (!CHAT.el) return;
+  const q = CHAT.filter.trim().toLowerCase();
+  const rooms = CHAT.rooms.filter((r) => !q || r.title.toLowerCase().includes(q) || (r.peer && r.peer.username.toLowerCase().includes(q)));
+  const items = rooms.map(roomItem);
+  if (q) {
+    const direct = new Set(CHAT.rooms.filter((r) => r.kind === "direct" && r.peer).map((r) => r.peer.id));
+    const people = CHAT.contacts.filter((c) => !direct.has(c.id) && (c.name.toLowerCase().includes(q) || c.username.toLowerCase().includes(q) || (c.role_title || "").toLowerCase().includes(q)));
+    if (people.length) {
+      items.push(h("div", { class: "chat-list-label" }, t("Сотрудники")));
+      for (const c of people) items.push(contactItem(c, () => openDirect(c.id)));
+    }
+  }
+  if (!items.length) items.push(h("div", { class: "chat-list-empty" }, q ? t("Ничего не найдено") : t("Чатов пока нет. Напишите коллеге или создайте группу.")));
+  CHAT.el.list.replaceChildren(...items);
+}
+
+function roomItem(r) {
+  return h(
+    "a",
+    { class: "chat-room" + (r.id === CHAT.current ? " active" : "") + (r.unread && !r.muted ? " unread" : ""), href: "#/chat/" + r.id },
+    chatAvatar(r.title, r.peer ? r.peer.id : r.id + 7, { group: r.kind === "group", online: r.peer && r.peer.online }),
+    h(
+      "div",
+      { class: "chat-room-body" },
+      h("div", { class: "chat-room-top" }, h("span", { class: "chat-room-title" }, r.title), r.muted ? h("span", { class: "chat-muted", title: t("Без звука") }, icon("bellOff")) : null, h("span", { class: "chat-room-time" }, r.last_message ? chatStamp(r.last_message.created_at) : "")),
+      h("div", { class: "chat-room-bottom" }, h("span", { class: "chat-room-preview" }, messagePreview(r)), r.unread ? h("span", { class: "chat-unread" + (r.muted ? " muted" : "") }, r.unread > 99 ? "99+" : String(r.unread)) : null)
+    )
+  );
+}
+
+function contactItem(c, onclick, extra) {
+  return h(
+    "button",
+    { class: "chat-contact", type: "button", onclick },
+    chatAvatar(c.name, c.id, { online: c.online, small: true }),
+    h("div", { class: "grow" }, h("div", { class: "chat-contact-name" }, c.name), h("div", { class: "muted small" }, [c.role_title, c.online ? t("в сети") : ""].filter(Boolean).join(" · "))),
+    extra || null
+  );
+}
+
+async function openDirect(userId) {
+  const room = await guard(() => api("/api/chat/direct", { body: { user_id: userId } }));
+  if (!room) return null;
+  if (!CHAT.rooms.some((r) => r.id === room.id)) CHAT.rooms.unshift(room);
+  CHAT.filter = "";
+  if (CHAT.el) CHAT.el.search.value = "";
+  navigate("chat/" + room.id);
+  return room;
+}
+
+function chatEmpty() {
+  return h(
+    "div",
+    { class: "chat-empty" },
+    icon("message"),
+    h("h2", null, t("Выберите чат")),
+    h("p", { class: "muted" }, t("Напишите коллеге лично или соберите группу — участников можно добавить сразу по ролям.")),
+    h("div", { class: "row", style: "justify-content:center" }, h("button", { class: "btn", onclick: newDirectDialog }, icon("edit"), t("Написать сотруднику")), h("button", { class: "btn primary", onclick: () => groupDialog(null) }, icon("users"), t("Новая группа")))
+  );
+}
+
+async function chatSelect(id) {
+  if (!CHAT.el) return;
+  CHAT.current = id;
+  CHAT.editing = null;
+  CHAT.el.box.classList.toggle("has-room", !!id);
+  renderRoomList();
+  if (!id) {
+    CHAT.room = null;
+    CHAT.messages = [];
+    CHAT.el.main.replaceChildren(chatEmpty());
+    return;
+  }
+  const seq = ++CHAT.select;
+  CHAT.el.main.replaceChildren(loading());
+  let room;
+  let msgs;
+  try {
+    [room, msgs] = await Promise.all([api(`/api/chat/rooms/${id}`), api(`/api/chat/rooms/${id}/messages?limit=60`)]);
+  } catch (e) {
+    if (seq === CHAT.select && CHAT.el) CHAT.el.main.replaceChildren(h("div", { class: "chat-empty" }, icon("alert"), h("p", null, e.message)));
+    return;
+  }
+  if (seq !== CHAT.select || !CHAT.el) return;
+  CHAT.room = room;
+  CHAT.messages = msgs.items;
+  CHAT.hasMore = msgs.has_more;
+  renderMain();
+  scrollToBottom();
+  chatMarkRead();
+}
+
+function chatSubtitle(room) {
+  if (room.kind === "direct") {
+    if (!room.peer) return t("Пользователь удалён");
+    return [room.peer.online ? t("в сети") : t("не в сети"), room.peer.role_title].filter(Boolean).join(" · ");
+  }
+  const parts = [t("Участников: {n}", { n: room.member_count })];
+  if (room.roles && room.roles.length) parts.push(t("по ролям: {roles}", { roles: room.roles.map(roleTitle).join(", ") }));
+  return parts.join(" · ");
+}
+
+function renderMain() {
+  const room = CHAT.room;
+  if (!room || !CHAT.el) return;
+  const messages = h("div", { class: "chat-messages", onscroll: onMessagesScroll });
+  const jump = h("button", { class: "chat-jump hidden", onclick: () => scrollToBottom(true) }, t("Новые сообщения"), " ↓");
+  const head = h(
+    "header",
+    { class: "chat-head" },
+    h("button", { class: "icon-btn chat-back", title: t("Назад"), onclick: () => navigate("chat") }, icon("arrowLeft")),
+    h(
+      "button",
+      { class: "chat-head-info", onclick: chatInfo, title: room.kind === "group" ? t("Участники и настройки группы") : t("О собеседнике") },
+      chatAvatar(room.title, room.peer ? room.peer.id : room.id + 7, { group: room.kind === "group", online: room.peer && room.peer.online }),
+      h("div", { class: "chat-head-text" }, h("div", { class: "chat-head-title" }, room.title), h("div", { class: "muted small chat-head-sub" }, chatSubtitle(room)))
+    ),
+    h(
+      "div",
+      { class: "row", style: "gap:4px" },
+      h("button", { class: "icon-btn", title: room.muted ? t("Включить уведомления") : t("Без звука"), onclick: toggleMute }, icon(room.muted ? "bellOff" : "bell")),
+      h("button", { class: "icon-btn", title: t("Участники и настройки группы"), onclick: chatInfo }, icon(room.kind === "group" ? "users" : "info"))
+    )
+  );
+  const draft = CHAT.el.composer && CHAT.el.composer.roomId === room.id ? CHAT.el.composer.input.value : "";
+  CHAT.el.messages = messages;
+  CHAT.el.jump = jump;
+  CHAT.el.composer = composer();
+  CHAT.el.composer.input.value = draft;
+  CHAT.el.composer.sync();
+  CHAT.el.main.replaceChildren(head, h("div", { class: "chat-scroll-wrap" }, messages, jump), CHAT.el.composer.el);
+  renderMessages();
+}
+
+function renderMessages() {
+  const box = CHAT.el && CHAT.el.messages;
+  if (!box) return;
+  const nodes = [];
+  if (CHAT.hasMore) nodes.push(h("div", { class: "chat-more" }, h("button", { class: "btn sm", onclick: loadOlder }, t("Показать ранние сообщения"))));
+  else if (!CHAT.messages.length) nodes.push(h("div", { class: "chat-start muted small" }, t("Это начало переписки")));
+  let prev = null;
+  for (const m of CHAT.messages) {
+    if (!prev || chatDay(prev.created_at) !== chatDay(m.created_at)) nodes.push(h("div", { class: "chat-day" }, h("span", null, chatDay(m.created_at))));
+    nodes.push(messageNode(m, prev));
+    prev = m;
+  }
+  box.replaceChildren(...nodes);
+}
+
+function messageNode(m, prev) {
+  const room = CHAT.room;
+  if (m.kind === "system") return h("div", { class: "chat-system" }, systemText(m));
+  const mine = m.user_id === S.me.id;
+  const grouped =
+    prev &&
+    prev.kind !== "system" &&
+    prev.user_id === m.user_id &&
+    chatDay(prev.created_at) === chatDay(m.created_at) &&
+    parseDate(m.created_at) - parseDate(prev.created_at) < 5 * 60 * 1000;
+  const bubble = h("div", {
+    class: "chat-bubble",
+    onclick: (e) => {
+      if (e.target.closest("a, button")) return;
+      const row = e.currentTarget.parentElement;
+      const open = row.classList.contains("show-actions");
+      document.querySelectorAll(".chat-msg.show-actions").forEach((x) => x.classList.remove("show-actions"));
+      if (!open) row.classList.add("show-actions");
+    },
+  });
+  if (!mine && room.kind === "group" && !grouped) bubble.append(h("div", { class: "chat-author", style: `--h:${hueOf(m.user_id)}` }, m.author || t("Удалённый пользователь")));
+  if (m.deleted) {
+    bubble.append(h("div", { class: "chat-deleted" }, t("Сообщение удалено")));
+  } else {
+    if (m.kind === "event" && m.data && m.data.event) bubble.append(eventCard(m.data.event));
+    if (m.text) bubble.append(h("div", { class: "chat-text" }, chatText(m.text)));
+  }
+  const read = mine && room.kind === "direct" && !m.deleted && room.peer_read_id >= m.id;
+  bubble.append(
+    h(
+      "span",
+      { class: "chat-meta" },
+      m.data && m.data.via === "telegram" && !m.deleted ? h("span", { class: "chat-via", title: t("Отправлено из Telegram") }, icon("send")) : null,
+      m.edited_at && !m.deleted ? t("изменено") + " · " : "",
+      chatTime(m.created_at),
+      mine && room.kind === "direct" && !m.deleted ? h("span", { class: "chat-ticks" + (read ? " read" : ""), title: read ? t("Прочитано") : t("Отправлено") }, read ? "✓✓" : "✓") : null
+    )
+  );
+  const actions = [];
+  if (!m.deleted && mine) actions.push(h("button", { class: "icon-btn", title: t("Изменить"), onclick: () => startEdit(m) }, icon("edit")));
+  if (!m.deleted && (mine || room.can_manage)) actions.push(h("button", { class: "icon-btn", title: t("Удалить"), onclick: () => deleteMessage(m) }, icon("trash")));
+  const showAvatar = !mine && room.kind === "group";
+  return h(
+    "div",
+    { class: "chat-msg" + (mine ? " mine" : "") + (grouped ? " grouped" : ""), "data-id": m.id },
+    showAvatar ? (grouped ? h("span", { class: "chat-avatar-spacer" }) : chatAvatar(m.author, m.user_id, { small: true })) : null,
+    bubble,
+    actions.length ? h("div", { class: "chat-actions" }, actions) : null
+  );
+}
+
+function eventCard(ev) {
+  return h(
+    "button",
+    { class: "chat-event", type: "button", onclick: () => openEvent(ev.id), title: t("Открыть событие") },
+    h("span", { class: "dot " + ev.severity }),
+    h("span", { class: "grow" }, h("span", { class: "chat-event-title" }, ev.title), h("span", { class: "muted small" }, [SEV[ev.severity], CAT[ev.category], ev.source_name, "#" + ev.id].filter(Boolean).join(" · ")))
+  );
+}
+
+function nearBottom() {
+  const box = CHAT.el && CHAT.el.messages;
+  return !box || box.scrollHeight - box.scrollTop - box.clientHeight < 140;
+}
+
+function scrollToBottom(smooth = false) {
+  const box = CHAT.el && CHAT.el.messages;
+  if (!box) return;
+  box.scrollTo({ top: box.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  if (CHAT.el.jump) CHAT.el.jump.classList.add("hidden");
+}
+
+function onMessagesScroll() {
+  if (nearBottom()) {
+    if (CHAT.el.jump) CHAT.el.jump.classList.add("hidden");
+    chatMarkRead();
+  }
+}
+
+async function loadOlder() {
+  const first = CHAT.messages[0];
+  if (!first || !CHAT.current) return;
+  const box = CHAT.el.messages;
+  const before = box.scrollHeight - box.scrollTop;
+  const data = await guard(() => api(`/api/chat/rooms/${CHAT.current}/messages?before=${first.id}&limit=60`));
+  if (!data || !CHAT.el) return;
+  CHAT.messages = data.items.concat(CHAT.messages);
+  CHAT.hasMore = data.has_more;
+  renderMessages();
+  box.scrollTop = box.scrollHeight - before;
+}
+
+function chatAppend(items) {
+  if (!items.length || !CHAT.room) return;
+  const known = new Set(CHAT.messages.map((m) => m.id));
+  const fresh = items.filter((m) => m.room_id === CHAT.current && !known.has(m.id));
+  if (!fresh.length) return;
+  const stick = nearBottom() || fresh.some((m) => m.user_id === S.me.id);
+  CHAT.messages = CHAT.messages.concat(fresh).sort((a, b) => a.id - b.id);
+  renderMessages();
+  if (stick) {
+    scrollToBottom();
+    chatMarkRead();
+  } else if (CHAT.el.jump) {
+    CHAT.el.jump.classList.remove("hidden");
+  }
+}
+
+function chatMarkRead() {
+  const room = CHAT.rooms.find((r) => r.id === CHAT.current);
+  const last = CHAT.messages[CHAT.messages.length - 1];
+  if (!CHAT.current || !last || document.hidden || !nearBottom()) return;
+  if (room && room.last_read_id >= last.id && !room.unread) return;
+  clearTimeout(CHAT.readTimer);
+  const roomId = CHAT.current;
+  CHAT.readTimer = setTimeout(async () => {
+    const r = await api(`/api/chat/rooms/${roomId}/read`, { body: { last_id: last.id } }).catch(() => null);
+    if (!r) return;
+    S.chatUnread = r.unread;
+    updateBadges();
+    const item = CHAT.rooms.find((x) => x.id === roomId);
+    if (item) {
+      item.last_read_id = r.last_read_id;
+      item.unread = 0;
+    }
+    renderRoomList();
+  }, 250);
+}
+
+async function chatRefreshRooms() {
+  const data = await api("/api/chat/rooms").catch(() => null);
+  if (!data || !CHAT.el) return;
+  CHAT.rooms = data.items;
+  S.chatUnread = data.unread;
+  updateBadges();
+  renderRoomList();
+}
+
+async function chatReloadCurrent() {
+  const id = CHAT.current;
+  if (!id || !CHAT.el) return;
+  let room;
+  let msgs;
+  try {
+    [room, msgs] = await Promise.all([api(`/api/chat/rooms/${id}`), api(`/api/chat/rooms/${id}/messages?limit=${Math.max(60, CHAT.messages.length)}`)]);
+  } catch (e) {
+    if (CHAT.current === id) {
+      toast(t("Вы больше не участник этого чата"), "error");
+      navigate("chat");
+    }
+    return;
+  }
+  if (CHAT.current !== id || !CHAT.el) return;
+  const stick = nearBottom();
+  const top = CHAT.el.messages ? CHAT.el.messages.scrollTop : 0;
+  CHAT.room = room;
+  CHAT.messages = msgs.items;
+  CHAT.hasMore = msgs.has_more;
+  renderMain();
+  if (stick) scrollToBottom();
+  else if (CHAT.el.messages) CHAT.el.messages.scrollTop = top;
+}
+
+async function chatLoop() {
+  const token = ++CHAT.loop;
+  let failures = 0;
+  while (token === CHAT.loop && S.route === "chat" && S.token) {
+    CHAT.controller = new AbortController();
+    let data;
+    try {
+      data = await api(`/api/chat/updates?after=${CHAT.last}&rev=${CHAT.rev}&timeout=25`, { signal: CHAT.controller.signal });
+      failures = 0;
+    } catch (e) {
+      if (token !== CHAT.loop) return;
+      failures++;
+      await sleep(Math.min(15000, 1500 * failures));
+      continue;
+    }
+    if (token !== CHAT.loop) return;
+    CHAT.last = Math.max(CHAT.last, data.last_id || 0);
+    const changed = data.rev !== CHAT.rev;
+    CHAT.rev = data.rev;
+    S.chatUnread = data.unread;
+    updateBadges();
+    chatAppend(data.messages || []);
+    if (changed && CHAT.current) await chatReloadCurrent();
+    if ((data.messages && data.messages.length) || changed) await chatRefreshRooms();
+    for (const m of data.messages || []) {
+      if (m.user_id !== S.me.id && m.kind !== "system" && (document.hidden || m.room_id !== CHAT.current)) chatNotify(m);
+    }
+  }
+}
+
+function chatNotify(m) {
+  if (bridge() || !S.me.notify_desktop || !("Notification" in window) || Notification.permission !== "granted") return;
+  const room = CHAT.rooms.find((r) => r.id === m.room_id);
+  if (room && room.muted) return;
+  const title = room && room.kind === "group" ? `${m.author} · ${room.title}` : m.author;
+  const body = m.text || (m.data && m.data.event ? m.data.event.title : "");
+  try {
+    const note = new Notification("💬 " + title, { body, tag: "ow-chat-" + m.id, icon: "/favicon.svg" });
+    note.onclick = () => {
+      window.focus();
+      navigate("chat/" + m.room_id);
+      note.close();
+    };
+  } catch (e) {
+    return;
+  }
+}
+
+function composer() {
+  const room = CHAT.room;
+  const ta = h("textarea", { class: "chat-input", rows: 1, placeholder: t("Сообщение…") });
+  const editBar = h("div", { class: "chat-editbar hidden" });
+  const suggest = h("div", { class: "chat-suggest hidden" });
+  const send = h("button", { class: "btn primary chat-send", title: t("Отправить (Enter)"), onclick: () => submit() }, icon("send"));
+  let options = [];
+  let active = 0;
+  function autosize() {
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight, 160) + "px";
+  }
+  function sync() {
+    if (CHAT.editing) {
+      editBar.classList.remove("hidden");
+      editBar.replaceChildren(icon("edit"), h("span", { class: "grow" }, t("Редактирование сообщения")), h("button", { class: "icon-btn", title: t("Отмена"), onclick: cancelEdit }, icon("x")));
+    } else {
+      editBar.classList.add("hidden");
+    }
+    autosize();
+  }
+  function cancelEdit() {
+    CHAT.editing = null;
+    ta.value = "";
+    sync();
+    ta.focus();
+  }
+  function mentionQuery() {
+    const before = ta.value.slice(0, ta.selectionStart);
+    const m = before.match(/(^|\s)@([A-Za-z0-9._-]*)$/);
+    return m ? m[2].toLowerCase() : null;
+  }
+  function updateSuggest() {
+    const q = room.kind === "group" ? mentionQuery() : null;
+    if (q === null) {
+      suggest.classList.add("hidden");
+      options = [];
+      return;
+    }
+    options = (room.members || []).filter((m) => !m.me && (m.username.toLowerCase().includes(q) || m.name.toLowerCase().includes(q))).slice(0, 6);
+    if (!options.length) {
+      suggest.classList.add("hidden");
+      return;
+    }
+    active = Math.min(active, options.length - 1);
+    suggest.replaceChildren(
+      ...options.map((m, i) =>
+        h("button", { type: "button", class: "chat-suggest-item" + (i === active ? " active" : ""), onmousedown: (e) => { e.preventDefault(); pick(m); } }, chatAvatar(m.name, m.id, { small: true }), h("span", null, m.name), h("span", { class: "muted small" }, "@" + m.username))
+      )
+    );
+    suggest.classList.remove("hidden");
+  }
+  function pick(member) {
+    const pos = ta.selectionStart;
+    const before = ta.value.slice(0, pos).replace(/@([A-Za-z0-9._-]*)$/, "@" + member.username + " ");
+    ta.value = before + ta.value.slice(pos);
+    ta.selectionStart = ta.selectionEnd = before.length;
+    suggest.classList.add("hidden");
+    options = [];
+    ta.focus();
+    autosize();
+  }
+  async function submit() {
+    const text = ta.value.trim();
+    if (!text) return;
+    if (CHAT.editing) {
+      const id = CHAT.editing;
+      const r = await guard(() => api(`/api/chat/messages/${id}`, { method: "PUT", body: { text } }));
+      if (!r) return;
+      CHAT.messages = CHAT.messages.map((m) => (m.id === r.id ? r : m));
+      cancelEdit();
+      renderMessages();
+      return;
+    }
+    ta.value = "";
+    autosize();
+    send.disabled = true;
+    const r = await guard(() => api(`/api/chat/rooms/${room.id}/messages`, { body: { text } }));
+    send.disabled = false;
+    if (!r) {
+      ta.value = text;
+      autosize();
+      return;
+    }
+    chatAppend([r]);
+    const item = CHAT.rooms.find((x) => x.id === room.id);
+    if (item) {
+      item.last_message = r;
+      item.last_message_at = r.created_at;
+      CHAT.rooms = [item].concat(CHAT.rooms.filter((x) => x.id !== item.id));
+      renderRoomList();
+    }
+    ta.focus();
+  }
+  ta.addEventListener("input", () => {
+    autosize();
+    updateSuggest();
+  });
+  ta.addEventListener("keydown", (e) => {
+    if (options.length && !suggest.classList.contains("hidden")) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        active = (active + (e.key === "ArrowDown" ? 1 : options.length - 1)) % options.length;
+        updateSuggest();
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        pick(options[active]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        suggest.classList.add("hidden");
+        options = [];
+        return;
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      submit();
+    } else if (e.key === "Escape" && CHAT.editing) {
+      e.stopPropagation();
+      cancelEdit();
+    } else if (e.key === "ArrowUp" && !ta.value) {
+      const own = [...CHAT.messages].reverse().find((m) => m.user_id === S.me.id && !m.deleted && m.kind !== "system");
+      if (own) {
+        e.preventDefault();
+        startEdit(own);
+      }
+    }
+  });
+  ta.addEventListener("blur", () => setTimeout(() => suggest.classList.add("hidden"), 150));
+  const el = h(
+    "footer",
+    { class: "chat-composer" },
+    editBar,
+    suggest,
+    h("div", { class: "chat-compose-row" }, ta, send),
+    h("div", { class: "chat-hint faint" }, room.kind === "group" ? t("Enter — отправить, Shift+Enter — новая строка, @ — упомянуть участника") : t("Enter — отправить, Shift+Enter — новая строка"))
+  );
+  setTimeout(() => ta.focus(), 0);
+  return { el, input: ta, sync, roomId: room.id };
+}
+
+function startEdit(m) {
+  if (!CHAT.el || !CHAT.el.composer) return;
+  CHAT.editing = m.id;
+  CHAT.el.composer.input.value = m.text;
+  CHAT.el.composer.sync();
+  CHAT.el.composer.input.focus();
+}
+
+function deleteMessage(m) {
+  confirmDialog(t("Удалить сообщение? Его не увидит никто из участников."), async () => {
+    const r = await guard(() => api(`/api/chat/messages/${m.id}`, { method: "DELETE" }));
+    if (!r) return;
+    CHAT.messages = CHAT.messages.map((x) => (x.id === r.id ? r : x));
+    if (CHAT.editing === m.id) CHAT.editing = null;
+    renderMessages();
+  });
+}
+
+async function toggleMute() {
+  const room = CHAT.room;
+  const r = await guard(() => api(`/api/chat/rooms/${room.id}/mute`, { method: "PUT", body: { muted: !room.muted } }), room.muted ? t("Уведомления включены") : t("Чат без звука"));
+  if (!r) return;
+  CHAT.room = Object.assign(CHAT.room, { muted: r.muted });
+  const stick = nearBottom();
+  renderMain();
+  if (stick) scrollToBottom();
+  chatRefreshRooms();
+}
+
+function newDirectDialog() {
+  let q = "";
+  const list = h("div", { class: "chat-picker" });
+  const draw = () => {
+    const items = CHAT.contacts.filter((c) => !q || c.name.toLowerCase().includes(q) || c.username.toLowerCase().includes(q) || (c.role_title || "").toLowerCase().includes(q));
+    const sorted = items.slice().sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+    list.replaceChildren(...(sorted.length ? sorted.map((c) => contactItem(c, async () => { m.close(); await openDirect(c.id); }, h("span", { class: "muted small" }, "@" + c.username))) : [emptyState("user", t("Сотрудники не найдены"))]));
+  };
+  const search = input({ type: "search", placeholder: t("Имя, логин или роль"), oninput: (e) => { q = e.target.value.trim().toLowerCase(); draw(); } });
+  draw();
+  const m = modal({ title: t("Написать сотруднику"), subtitle: t("Личная переписка один на один"), body: h("div", { class: "stack" }, search, list) });
+  setTimeout(() => search.focus(), 0);
+}
+
+async function groupDialog(room) {
+  const editing = !!room;
+  const contacts = (await api("/api/chat/contacts").catch(() => ({ items: CHAT.contacts }))).items;
+  CHAT.contacts = contacts;
+  const roles = S.meta.roles || [];
+  const myRole = S.me.role ? S.me.role.name : "";
+  const counts = {};
+  for (const c of contacts) if (c.role) counts[c.role] = (counts[c.role] || 0) + 1;
+  if (myRole) counts[myRole] = (counts[myRole] || 0) + 1;
+  const st = {
+    title: editing ? room.title : "",
+    description: editing ? room.description : "",
+    roles: new Set(editing ? room.roles : []),
+    sync: editing ? room.roles.length > 0 : true,
+    users: new Set(editing ? room.members.filter((m) => !m.via_role && !m.me).map((m) => m.id) : []),
+    q: "",
+  };
+  const byRole = (c) => c.role && st.roles.has(c.role);
+  const chipsBox = h("div", { class: "chips" });
+  const list = h("div", { class: "chat-picker compact" });
+  const summary = h("div", { class: "muted small" });
+  const syncBox = h("div");
+  function total() {
+    const ids = new Set([S.me.id]);
+    for (const c of contacts) if (st.users.has(c.id) || byRole(c)) ids.add(c.id);
+    return ids.size;
+  }
+  function drawChips() {
+    chipsBox.replaceChildren(
+      ...roles.map((r) =>
+        h(
+          "button",
+          { type: "button", class: "chip" + (st.roles.has(r.name) ? " active" : ""), disabled: !counts[r.name], onclick: () => { if (st.roles.has(r.name)) st.roles.delete(r.name); else st.roles.add(r.name); draw(); } },
+          r.title,
+          h("span", { class: "chip-count" }, String(counts[r.name] || 0))
+        )
+      )
+    );
+  }
+  function drawList() {
+    const q = st.q;
+    const items = contacts.filter((c) => !q || c.name.toLowerCase().includes(q) || c.username.toLowerCase().includes(q) || (c.role_title || "").toLowerCase().includes(q));
+    list.replaceChildren(
+      ...(items.length
+        ? items.map((c) => {
+            const covered = byRole(c);
+            const checked = covered || st.users.has(c.id);
+            return h(
+              "label",
+              { class: "chat-pick" + (covered ? " covered" : "") },
+              h("input", { type: "checkbox", checked, disabled: covered, onchange: (e) => { if (e.target.checked) st.users.add(c.id); else st.users.delete(c.id); drawSummary(); } }),
+              chatAvatar(c.name, c.id, { small: true, online: c.online }),
+              h("span", { class: "grow" }, h("span", { class: "chat-contact-name" }, c.name), h("span", { class: "muted small" }, c.role_title || t("Без роли"))),
+              covered ? h("span", { class: "badge accent" }, t("по роли")) : null
+            );
+          })
+        : [emptyState("user", t("Сотрудники не найдены"))])
+    );
+  }
+  function drawSummary() {
+    summary.textContent = t("Участников в группе: {n}", { n: total() });
+  }
+  function drawSync() {
+    syncBox.replaceChildren(
+      checkbox(t("Следить за ролями: новые сотрудники с этими ролями добавятся сами, при смене роли — исключатся"), st.sync, (v) => { st.sync = v; drawSummary(); })
+    );
+  }
+  function draw() {
+    drawChips();
+    drawList();
+    drawSummary();
+  }
+  draw();
+  drawSync();
+  const titleInput = input({ value: st.title, placeholder: t("Например: Дежурные сисадмины"), maxlength: 200, oninput: (e) => (st.title = e.target.value) });
+  const body = h(
+    "div",
+    { class: "stack" },
+    h("div", { class: "form-grid" }, field(t("Название *"), titleInput), field(t("Описание"), input({ value: st.description, placeholder: t("Зачем эта группа"), oninput: (e) => (st.description = e.target.value) }))),
+    h("div", null, h("div", { class: "label", style: "margin-bottom:6px" }, t("Участники по ролям")), chipsBox, h("div", { style: "margin-top:8px" }, syncBox)),
+    h("div", null, h("div", { class: "between", style: "margin-bottom:6px" }, h("div", { class: "label" }, t("Отдельные сотрудники")), input({ type: "search", class: "search", placeholder: t("Поиск"), oninput: (e) => { st.q = e.target.value.trim().toLowerCase(); drawList(); } })), list),
+    summary
+  );
+  const save = async () => {
+    if (!st.title.trim()) return toast(t("Укажите название группы"), "error");
+    let result;
+    if (!editing) {
+      result = await guard(() => api("/api/chat/rooms", { body: { title: st.title, description: st.description, user_ids: [...st.users], roles: [...st.roles], sync_roles: st.sync } }), t("Группа создана"));
+    } else {
+      result = await guard(async () => {
+        let r = await api(`/api/chat/rooms/${room.id}`, { method: "PUT", body: { title: st.title, description: st.description, roles: [...st.roles], sync_roles: st.sync } });
+        const present = new Set(r.members.map((m) => m.id));
+        const add = [...st.users].filter((id) => !present.has(id));
+        if (add.length) r = await api(`/api/chat/rooms/${room.id}/members`, { body: { user_ids: add } });
+        const keep = (m) => m.me || m.is_admin || m.via_role || st.users.has(m.id) || st.roles.has(contactRole(contacts, m.id));
+        for (const m of r.members.filter((x) => !keep(x))) {
+          r = (await api(`/api/chat/rooms/${room.id}/members/${m.id}`, { method: "DELETE" })) || r;
+        }
+        return r;
+      }, t("Группа сохранена"));
+    }
+    if (!result) return;
+    dlg.close();
+    if (CHAT.el) await chatRefreshRooms();
+    if (editing && CHAT.current === result.id) await chatReloadCurrent();
+    else navigate("chat/" + result.id);
+  };
+  const dlg = modal({
+    title: editing ? t("Настройки группы") : t("Новая группа"),
+    subtitle: editing ? room.title : t("Добавьте участников сразу по ролям или выберите сотрудников вручную"),
+    body,
+    wide: true,
+    foot: [h("button", { class: "btn", onclick: () => dlg.close() }, t("Отмена")), h("button", { class: "btn primary", onclick: save }, editing ? t("Сохранить") : t("Создать группу"))],
+  });
+  setTimeout(() => titleInput.focus(), 0);
+}
+
+function contactRole(contacts, id) {
+  const c = contacts.find((x) => x.id === id);
+  return c ? c.role : "";
+}
+
+function chatInfo() {
+  const room = CHAT.room;
+  if (!room) return;
+  if (room.kind === "direct") {
+    const p = room.peer;
+    const dlg = modal({
+      title: room.title,
+      subtitle: p ? "@" + p.username : "",
+      body: h(
+        "div",
+        { class: "stack" },
+        h("div", { class: "row" }, chatAvatar(room.title, p ? p.id : 0, { online: p && p.online }), h("div", null, h("div", { style: "font-weight:600" }, room.title), h("div", { class: "muted small" }, chatSubtitle(room)))),
+        h("div", { class: "muted small" }, t("Если собеседник не в сети, личные сообщения придут в Telegram, и ответить можно прямо оттуда."))
+      ),
+      foot: [h("button", { class: "btn", onclick: () => dlg.close() }, t("Закрыть"))],
+    });
+    return;
+  }
+  const rows = room.members.map((m) =>
+    h(
+      "div",
+      { class: "chat-member" },
+      chatAvatar(m.name, m.id, { small: true, online: m.online }),
+      h(
+        "div",
+        { class: "grow" },
+        h("div", { class: "chat-contact-name" }, m.name, m.me ? h("span", { class: "muted" }, " · " + t("вы")) : null),
+        h("div", { class: "muted small" }, [m.role_title, m.online ? t("в сети") : ""].filter(Boolean).join(" · "))
+      ),
+      m.is_admin ? h("span", { class: "badge accent" }, t("админ")) : null,
+      m.via_role ? h("span", { class: "badge outline", title: t("Добавлен автоматически по роли") }, t("по роли")) : null,
+      room.can_manage && !m.me
+        ? h(
+            "div",
+            { class: "row", style: "gap:2px" },
+            h("button", { class: "icon-btn", title: m.is_admin ? t("Снять права администратора") : t("Сделать администратором"), onclick: async () => { const r = await guard(() => api(`/api/chat/rooms/${room.id}/members/${m.id}`, { method: "PUT", body: { is_admin: !m.is_admin } })); if (r) { dlg.close(); CHAT.room = r; chatInfo(); } } }, icon("shield")),
+            h("button", { class: "icon-btn", title: t("Исключить из группы"), onclick: async () => { const r = await guard(() => api(`/api/chat/rooms/${room.id}/members/${m.id}`, { method: "DELETE" })); if (r) { dlg.close(); CHAT.room = r; chatInfo(); } } }, icon("x"))
+          )
+        : null
+    )
+  );
+  const foot = [
+    h("button", {
+      class: "btn danger",
+      onclick: () =>
+        confirmDialog(t("Покинуть группу «{title}»?", { title: room.title }), async () => {
+          const r = await guard(() => api(`/api/chat/rooms/${room.id}/members/${S.me.id}`, { method: "DELETE" }));
+          if (!r) return;
+          dlg.close();
+          await chatRefreshRooms();
+          navigate("chat");
+        }, t("Покинуть")),
+    }, icon("logout"), t("Покинуть группу")),
+  ];
+  if (room.can_manage) {
+    foot.push(
+      h("button", {
+        class: "btn danger",
+        onclick: () =>
+          confirmDialog(t("Удалить группу «{title}» вместе с перепиской?", { title: room.title }), async () => {
+            const r = await guard(() => api(`/api/chat/rooms/${room.id}`, { method: "DELETE" }), t("Группа удалена"));
+            if (!r) return;
+            dlg.close();
+            await chatRefreshRooms();
+            navigate("chat");
+          }),
+      }, icon("trash"), t("Удалить")),
+      h("button", { class: "btn primary", onclick: () => { dlg.close(); groupDialog(room); } }, icon("users"), t("Участники и роли"))
+    );
+  }
+  const dlg = modal({
+    title: room.title,
+    subtitle: chatSubtitle(room),
+    body: h("div", { class: "stack" }, room.description ? h("p", { class: "muted", style: "margin:0" }, room.description) : null, h("div", { class: "chat-members" }, rows)),
+    foot,
+    wide: true,
+  });
+}
+
+async function shareEventDialog(ev) {
+  let data;
+  try {
+    data = await api("/api/chat/rooms");
+  } catch (e) {
+    toast(e.message, "error");
+    return;
+  }
+  const contacts = (await api("/api/chat/contacts").catch(() => ({ items: [] }))).items;
+  const note = h("textarea", { placeholder: t("Комментарий (необязательно)"), style: "min-height:60px" });
+  let q = "";
+  const list = h("div", { class: "chat-picker" });
+  async function share(roomId) {
+    const r = await guard(() => api(`/api/chat/rooms/${roomId}/messages`, { body: { text: note.value, event_id: ev.id } }), t("Событие отправлено в чат"));
+    if (!r) return;
+    dlg.close();
+    navigate("chat/" + roomId);
+  }
+  function draw() {
+    const rooms = data.items.filter((r) => !q || r.title.toLowerCase().includes(q));
+    const direct = new Set(data.items.filter((r) => r.peer).map((r) => r.peer.id));
+    const people = contacts.filter((c) => !direct.has(c.id) && (!q || c.name.toLowerCase().includes(q) || c.username.toLowerCase().includes(q)));
+    const items = rooms.map((r) =>
+      h("button", { class: "chat-contact", type: "button", onclick: () => share(r.id) }, chatAvatar(r.title, r.peer ? r.peer.id : r.id + 7, { small: true, group: r.kind === "group", online: r.peer && r.peer.online }), h("div", { class: "grow" }, h("div", { class: "chat-contact-name" }, r.title), h("div", { class: "muted small" }, r.kind === "group" ? t("Участников: {n}", { n: r.member_count }) : (r.peer && r.peer.role_title) || "")))
+    );
+    if (people.length) items.push(h("div", { class: "chat-list-label" }, t("Сотрудники")));
+    for (const c of people) {
+      items.push(
+        contactItem(c, async () => {
+          const room = await guard(() => api("/api/chat/direct", { body: { user_id: c.id } }));
+          if (room) share(room.id);
+        })
+      );
+    }
+    list.replaceChildren(...(items.length ? items : [emptyState("message", t("Ничего не найдено"))]));
+  }
+  draw();
+  const dlg = modal({
+    title: t("Обсудить в чате"),
+    subtitle: ev.title,
+    body: h("div", { class: "stack" }, note, input({ type: "search", placeholder: t("Кому отправить"), oninput: (e) => { q = e.target.value.trim().toLowerCase(); draw(); } }), list),
+  });
+}
+
+const PAGES = {
+  overview: pageOverview,
+  chat: pageChat,
+  monitoring: categoryPage("monitoring", t("Мониторинг"), t("Zabbix, Prometheus, HTTP-проверки и другие системы")),
+  databases: categoryPage("database", t("Базы данных"), t("MySQL, PostgreSQL, MS SQL: доступность, размер, SQL-проверки")),
+  onec: categoryPage("onec", t("1С"), t("Файловые и серверные базы, журнал регистрации, целостность")),
+  backups: pageBackups,
+  bugs: pageBugs,
+  journal: pageJournal,
+  sources: pageSources,
+  rules: pageRules,
+  users: pageUsers,
+  settings: pageSettings,
+  profile: pageProfile,
+};
+
+boot();
